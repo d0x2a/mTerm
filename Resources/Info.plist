@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>mTerm</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>__BUNDLE_ID__</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>mTerm</string>
+    <key>CFBundleDisplayName</key>
+    <string>mTerm</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSSupportsAutomaticTermination</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Dox2A Labs LLC. MIT License.</string>
+
+    <!-- Files-and-Folders TCC usage descriptions. mTerm itself doesn't read
+         these locations, but shell commands run inside a tab routinely do
+         (cd, ls, cat, etc). Without these strings macOS shows a generic
+         "would like to access" prompt; with them, the user sees why. -->
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Shell commands you run in mTerm may need to read files on the Desktop.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Shell commands you run in mTerm may need to read files in Documents.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Shell commands you run in mTerm may need to read files in Downloads.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Shell commands you run in mTerm may need to read files on removable volumes (USB drives, external disks).</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Shell commands you run in mTerm may need to read files on network volumes.</string>
+</dict>
+</plist>
