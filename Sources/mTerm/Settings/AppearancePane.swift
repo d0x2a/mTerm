@@ -1,14 +1,16 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import simd
 
 struct AppearancePane: View {
     @ObservedObject private var store = ThemeStore.shared
 
     private var lightThemes: [Theme] {
-        Theme.builtin.filter { $0.appearance == .light }
+        store.allThemes.filter { $0.appearance == .light }
     }
     private var darkThemes: [Theme] {
-        Theme.builtin.filter { $0.appearance == .dark }
+        store.allThemes.filter { $0.appearance == .dark }
     }
 
     var body: some View {
@@ -30,6 +32,10 @@ struct AppearancePane: View {
                 Picker("Dark theme",
                        selection: $store.settings.darkThemeId) {
                     ForEach(darkThemes) { Text($0.name).tag($0.id) }
+                }
+                HStack {
+                    Spacer()
+                    Button("Import theme…") { importTheme() }
                 }
             }
 
@@ -58,6 +64,35 @@ struct AppearancePane: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func importTheme() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose an iTerm2 .itermcolors file"
+        if let type = UTType(filenameExtension: "itermcolors") {
+            panel.allowedContentTypes = [type]
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let theme = try store.importTheme(from: url)
+            // Auto-select the freshly imported theme for its appearance bucket.
+            if theme.appearance == .light {
+                store.settings.lightThemeId = theme.id
+            } else {
+                store.settings.darkThemeId = theme.id
+            }
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Couldn't import theme"
+            alert.informativeText = (error as? ThemeImportError)?.errorDescription
+                ?? error.localizedDescription
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
     }
 }
 

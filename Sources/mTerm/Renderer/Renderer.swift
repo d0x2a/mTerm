@@ -204,8 +204,6 @@ final class Renderer {
         let cursorColor = theme.cursor
         let defaultBg = theme.background
         let selectionColor = theme.selection
-        let outlineThickness: Float = max(1, layout.scale)
-
         // Highlight bands (search matches, trigger highlights) — drawn before
         // selection/cursor so those overlay on top.
         let underlineThickness = max(1, layout.scale)
@@ -239,26 +237,6 @@ final class Renderer {
             }
         }
 
-        // Prompt gutter dots — small filled squares centered in the left padding.
-        let dotSize: Float = 4 * layout.scale
-        let dotX: Float = max(0, origin.x / 2 - dotSize / 2)
-        for p in snapshot.prompts {
-            let color: SIMD4<Float>
-            if let code = p.exitCode {
-                color = (code == 0)
-                    ? SIMD4(0.35, 0.78, 0.45, 1.0)        // green = success
-                    : SIMD4(0.95, 0.40, 0.40, 1.0)        // red = failure
-            } else {
-                color = SIMD4(0.50, 0.50, 0.50, 0.80)     // grey = running / unknown
-            }
-            let dotY = origin.y + Float(p.viewportRow) * cellHeight + (cellHeight - dotSize) / 2
-            flats.append(FlatInstance(
-                pos: SIMD2<Float>(dotX, dotY),
-                size: SIMD2<Float>(dotSize, dotSize),
-                color: color
-            ))
-        }
-
         for row in 0..<snapshot.rows {
             let baselineY = origin.y + Float(row) * cellHeight + ascent
             let cellTop = origin.y + Float(row) * cellHeight
@@ -281,16 +259,10 @@ final class Renderer {
                 if isSelected {
                     flats.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: selectionColor))
                 }
-                if isCursor {
-                    if !focused {
-                        // Unfocused: 1-point outline around the cell.
-                        appendOutline(into: &flats, pos: cellRect.pos, size: cellRect.size,
-                                      thickness: outlineThickness, color: cursorColor)
-                    } else if cursorOn {
-                        flats.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: cursorColor))
-                    }
-                    // else: focused but in the "off" phase of the blink → draw nothing.
+                if isCursor && focused && cursorOn {
+                    flats.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: cursorColor))
                 }
+                // Otherwise: unfocused window or "off" half of the blink → no cursor.
 
                 // Glyph: skip blank cells.
                 if cell.scalar == " " { continue }
@@ -319,27 +291,6 @@ final class Renderer {
         return (flats, glyphs)
     }
 
-    private func appendOutline(into flats: inout [FlatInstance],
-                               pos: SIMD2<Float>, size: SIMD2<Float>,
-                               thickness: Float, color: SIMD4<Float>) {
-        let t = thickness
-        // top
-        flats.append(FlatInstance(pos: pos,
-                                  size: SIMD2(size.x, t),
-                                  color: color))
-        // bottom
-        flats.append(FlatInstance(pos: SIMD2(pos.x, pos.y + size.y - t),
-                                  size: SIMD2(size.x, t),
-                                  color: color))
-        // left
-        flats.append(FlatInstance(pos: SIMD2(pos.x, pos.y + t),
-                                  size: SIMD2(t, size.y - 2 * t),
-                                  color: color))
-        // right
-        flats.append(FlatInstance(pos: SIMD2(pos.x + size.x - t, pos.y + t),
-                                  size: SIMD2(t, size.y - 2 * t),
-                                  color: color))
-    }
 
     private func growBuffer<T>(_ buffer: inout MTLBuffer?,
                                capacity: inout Int,

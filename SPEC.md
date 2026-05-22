@@ -70,7 +70,7 @@ Key boundaries:
 
 - **Tabs only. No splits.** One PTY per tab. For multi-pane workflows, use tmux/zellij.
 - **Sidebar tab list, not the system tab bar.** Tabs live in a left-hand sidebar (custom `SidebarView` inside an `NSSplitViewController`), not in macOS's `NSWindowTabbing`. The sidebar is collapsible; tab rows show the current CWD basename / shell title. This trades the "merge windows / move tabs across windows" gestures for a denser, always-visible list that scales past ~10 tabs without overflow.
-- New tab inherits the current tab's CWD by default (shell-integration aware; falls back to home).
+- New tabs always start in `$HOME`. (Older drafts of the spec called for inheriting the active tab's CWD, but in practice that surprised users more often than it helped — especially for GUI-launched sessions where the active tab's CWD might be deep inside a project tree.)
 - ⌘T / ⌘W / ⌘⇧[ / ⌘⇧] for tab navigation. ⌘1–⌘9 to jump to tab N.
 - Tabs persist across launches if "Restore session" is enabled.
 
@@ -90,10 +90,9 @@ Classic terminal *look* (a stream of text), but with prompt awareness underneath
 - **Protocol:** Standard OSC 7 (CWD) and OSC 133 (prompt/command/output) sequences.
 - **Auto-injection:** On launch, mTerm injects a small integration snippet via `$PROMPT_COMMAND` / `precmd` / fish event for bash/zsh/fish. User can disable in prefs.
 - **UI surfaces enabled by integration:**
-  - **Prompt markers:** Small gutter dot next to each prompt line. Color reflects the previous command's exit status (green/red/grey for unknown).
   - **Jump-to-prompt:** ⌘↑ / ⌘↓ move the viewport to the previous/next prompt.
   - **Select command:** Triple-click selects a whole command + its output.
-  - **CWD tracking:** New tabs inherit the active tab's CWD; window/tab title reflects CWD.
+  - **CWD tracking:** Window/tab title reflects the active tab's CWD (basename, with `~` folding for `$HOME`).
 
 No collapsible "blocks." No reformatting of output. The terminal still looks like a terminal.
 
@@ -228,7 +227,7 @@ Required to ship 1.0:
 - [ ] xterm-256color compatibility (vim/neovim/htop/tmux/fzf/less/git verified)
 - [ ] PTY + child process management
 - [ ] Scrollback (configurable size) + search (plain + regex)
-- [ ] Shell integration (bash/zsh/fish), prompt markers, jump-to-prompt
+- [ ] Shell integration (bash/zsh/fish), jump-to-prompt
 - [ ] Triggers (highlight + clickable URLs/paths + custom)
 - [ ] tmux `-CC` integration mode
 - [ ] Profiles (simplified model)
@@ -256,7 +255,7 @@ Required to ship 1.0:
 3. **PTY + parser:** fork a shell, parse VT sequences into a `TerminalState`. Render real shell output. (3 wks)
 4. **Input + scrollback + selection:** keyboard, mouse, copy/paste, scrollback ring. (2 wks)
 5. **Tabs + windows + persistence:** `NSWindowTabbing`, session restore. (1 wk)
-6. **Shell integration + prompt markers:** OSC 133, gutter, jump-to-prompt. (1 wk)
+6. **Shell integration:** OSC 133, jump-to-prompt. (1 wk)
 7. **Themes + appearance + settings UI:** SwiftUI settings with search, theme files, live preview. (2 wks)
 8. **Triggers + smart selection:** regex engine, action types. (1 wk)
 9. **tmux -CC mode:** control protocol, tab mapping. (1 wk)
