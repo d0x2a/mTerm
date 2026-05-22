@@ -218,6 +218,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     func sidebarDidSelect(tabId: UUID)      { selectTab(tabId) }
     func sidebarDidRequestClose(tabId: UUID) { closeTab(tabId) }
 
+    /// SidebarView reports `toIndex` as a gap index in the pre-move array.
+    /// We remove the dragged tab first and then insert at the target gap,
+    /// adjusting by -1 when the gap was to the right of the original slot
+    /// (the removal shifted later indices down by one).
+    func sidebarDidReorderTab(tabId: UUID, toIndex: Int) {
+        guard let from = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        let tab = tabs.remove(at: from)
+        let insertAt = toIndex > from ? toIndex - 1 : toIndex
+        let clamped = max(0, min(tabs.count, insertAt))
+        tabs.insert(tab, at: clamped)
+        refreshSidebar()
+    }
+
     // MARK: TerminalViewDelegate
 
     func terminalView(_ view: TerminalView, didUpdate title: String, cwd: String?) {

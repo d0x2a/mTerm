@@ -1,3 +1,4 @@
+import Foundation
 import simd
 
 enum ThemeAppearance: String, Codable, CaseIterable {
@@ -29,11 +30,8 @@ extension Theme {
         tomorrowNight,
         solarizedDark, solarizedLight,
         nord, dracula, gruvboxDark,
+        pencilLight,
     ]
-
-    static func byId(_ id: String) -> Theme {
-        builtin.first { $0.id == id } ?? mTermDark
-    }
 
     // MARK: bundled themes
 
@@ -169,4 +167,129 @@ extension Theme {
             rgb(0x83a598), rgb(0xd3869b), rgb(0x8ec07c), rgb(0xebdbb2),
         ]
     )
+
+    // Pencil Light — a low-contrast light palette. Bright ANSI variants
+    // intentionally mirror the regular ones (the source theme uses muted
+    // colors for both, so bold text changes weight without changing hue).
+    static let pencilLight = Theme(
+        id: "pencil-light",
+        name: "Pencil Light",
+        appearance: .light,
+        background: rgb(0xf9f9f9),
+        foreground: rgb(0x2a2c33),
+        cursor:     rgb(0xbbbbbb),
+        selection:  rgb(0xededed),
+        ansi: [
+            rgb(0x000000), rgb(0xde3e35), rgb(0x3f953a), rgb(0xd2b67c),
+            rgb(0x2f5af3), rgb(0x950095), rgb(0x3f953a), rgb(0xbbbbbb),
+            rgb(0x000000), rgb(0xde3e35), rgb(0x3f953a), rgb(0xd2b67c),
+            rgb(0x2f5af3), rgb(0xa00095), rgb(0x3f953a), rgb(0xffffff),
+        ]
+    )
+}
+
+// MARK: - Imported themes (iTerm2 .itermcolors)
+
+enum ThemeImportError: LocalizedError {
+    case unreadableFile
+    case malformedPlist
+    case missingColors
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadableFile:  return "Could not read the selected file."
+        case .malformedPlist:  return "The file isn't a valid property list."
+        case .missingColors:   return "The file is missing one or more required color entries."
+        }
+    }
+}
+
+extension Theme {
+    /// `~/Library/Application Support/mTerm/themes/`. Created on first access.
+    static var themesDirectory: URL? {
+        let fm = FileManager.default
+        guard let base = fm.urls(for: .applicationSupportDirectory,
+                                 in: .userDomainMask).first
+        else { return nil }
+        let dir = base.appendingPathComponent("mTerm/themes", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Loads every `.itermcolors` file in the themes directory.
+    static func loadImported() -> [Theme] {
+        guard let dir = themesDirectory else { return [] }
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return urls
+            .filter { $0.pathExtension.lowercased() == "itermcolors" }
+            .compactMap { try? importItermColors(from: $0) }
+    }
+
+    /// Parses an iTerm2 `.itermcolors` plist into a Theme. The id and name
+    /// derive from the filename (so "Pencil Light.itermcolors" becomes
+    /// `id: "pencil-light"`, `name: "Pencil Light"`). Appearance is guessed
+    /// from background luminance.
+    static func importItermColors(from url: URL) throws -> Theme {
+        let data: Data
+        do { data = try Data(contentsOf: url) }
+        catch { throw ThemeImportError.unreadableFile }
+
+        let plist: Any
+        do {
+            plist = try PropertyListSerialization.propertyList(
+                from: data, format: nil
+            )
+        } catch { throw ThemeImportError.malformedPlist }
+
+        guard let dict = plist as? [String: Any] else {
+            throw ThemeImportError.malformedPlist
+        }
+
+        func color(_ key: String) -> SIMD4<Float>? {
+            guard let entry = dict[key] as? [String: Any],
+                  let r = (entry["Red Component"]   as? NSNumber)?.floatValue,
+                  let g = (entry["Green Component"] as? NSNumber)?.floatValue,
+                  let b = (entry["Blue Component"]  as? NSNumber)?.floatValue
+            else { return nil }
+            let a = (entry["Alpha Component"] as? NSNumber)?.floatValue ?? 1.0
+            return SIMD4(r, g, b, a)
+        }
+
+        var ansi: [SIMD4<Float>] = []
+        for i in 0..<16 {
+            guard let c = color("Ansi \(i) Color") else {
+                throw ThemeImportError.missingColors
+            }
+            ansi.append(c)
+        }
+        guard let bg = color("Background Color"),
+              let fg = color("Foreground Color"),
+              let cursor = color("Cursor Color"),
+              let selection = color("Selection Color")
+        else { throw ThemeImportError.missingColors }
+
+        let name = url.deletingPathExtension().lastPathComponent
+        let id = "imported-" + name
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        // Quick perceptual-luminance check (Rec. 709 weights).
+        let lum = 0.2126 * bg.x + 0.7152 * bg.y + 0.0722 * bg.z
+        let appearance: ThemeAppearance = lum > 0.5 ? .light : .dark
+
+        return Theme(
+            id: id,
+            name: name,
+            appearance: appearance,
+            background: bg,
+            foreground: fg,
+            cursor: cursor,
+            selection: selection,
+            ansi: ansi
+        )
+    }
 }

@@ -126,8 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openNewTab(_ sender: Any?) {
         guard let controller = activeController() else { return }
-        let inheritedCwd = controller.activeTerminalView?.currentDirectory
-        controller.newTab(initialCwd: inheritedCwd)
+        // New tabs always start in the user's home directory.
+        // Tab.init resolves nil to NSHomeDirectory().
+        controller.newTab(initialCwd: nil)
     }
 
     @objc func closeActiveTab(_ sender: Any?) {
