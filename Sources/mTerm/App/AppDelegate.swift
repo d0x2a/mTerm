@@ -17,6 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Force ThemeStore to spin up on the main thread before any session.
         _ = ThemeStore.shared
 
+        // Wire up notifications (delegate + permission prompt). No-ops in
+        // `swift run` dev builds that lack a bundle identifier.
+        NotificationManager.shared.configure()
+
         appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { app, _ in
             let isDark = app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             DispatchQueue.main.async {

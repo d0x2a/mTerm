@@ -25,10 +25,12 @@ final class GlyphAtlas {
     let font: CTFont
     let width: Int
     let height: Int
-    /// When false, glyphs are rasterized without CoreGraphics's stroke-
-    /// dilation pass — lighter, "thinner" rendering. iTerm2's "Use thin
-    /// strokes" toggle does the same thing.
-    let thinStrokes: Bool
+    /// 0.0 = no stem-darkening (pure CoreText AA, can look too thin on
+    /// dark themes). 1.0 ≈ macOS's old CG font-smoothing dilation. The
+    /// rasterizer always renders without CG smoothing and then applies a
+    /// gamma curve to the alpha bitmap whose strength is keyed off this
+    /// value, giving a continuous "thin → bold" knob.
+    let strokeWeight: Double
 
     /// Atlas entries are keyed by (fontID, glyph). CGGlyph IDs are font-local,
     /// so once we start using fallback fonts for missing glyphs (e.g. ➜ which
@@ -44,12 +46,29 @@ final class GlyphAtlas {
     /// push anti-aliased pixels past the bitmap edge.
     private let pad = 2
 
-    init(device: MTLDevice, font: CTFont, thinStrokes: Bool,
+    /// Per-pixel alpha remap for the strokeWeight gamma boost. nil when
+    /// strokeWeight == 0 (the no-op case skips the post-process entirely).
+    private let strokeLUT: [UInt8]?
+
+    init(device: MTLDevice, font: CTFont, strokeWeight: Double,
          width: Int = 2048, height: Int = 2048) {
         self.font = font
-        self.thinStrokes = thinStrokes
+        self.strokeWeight = strokeWeight
         self.width = width
         self.height = height
+
+        if strokeWeight > 0 {
+            let exponent = 1.0 - 0.5 * strokeWeight
+            var table = [UInt8](repeating: 0, count: 256)
+            for i in 0..<256 {
+                let v = Double(i) / 255.0
+                let boosted = pow(v, exponent)
+                table[i] = UInt8(min(255, Int(boosted * 255 + 0.5)))
+            }
+            self.strokeLUT = table
+        } else {
+            self.strokeLUT = nil
+        }
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r8Unorm,
@@ -143,11 +162,9 @@ final class GlyphAtlas {
         ) else { return nil }
 
         ctx.setShouldAntialias(true)
-        // Stroke dilation. CG's "font smoothing" thickens strokes on
-        // anti-aliased text. Turning it off matches the iTerm2 "Use thin
-        // strokes" look — preferred on Retina, where the dilation is
-        // mostly a holdover from non-Retina LCDs.
-        ctx.setShouldSmoothFonts(!thinStrokes)
+        // We never use CG's font smoothing (it's a binary on/off knob); the
+        // strokeWeight gamma pass below provides a continuous equivalent.
+        ctx.setShouldSmoothFonts(false)
         ctx.setFillColor(CGColor(gray: 1.0, alpha: 1.0))
 
         // Bearings are the bitmap's offset from the cell origin (X) and from
@@ -187,6 +204,22 @@ final class GlyphAtlas {
         guard let (ax, ay) = alloc(w: bitmapW, h: bitmapH) else { return nil }
 
         let bytesPerRow = ctx.bytesPerRow
+
+        // Stroke-weight gamma boost: push the AA edge coverage toward 1
+        // so soft edges read as thicker. Skipped entirely at weight 0.
+        if let lut = strokeLUT {
+            let buf = data.assumingMemoryBound(to: UInt8.self)
+            lut.withUnsafeBufferPointer { lutPtr in
+                let lutBase = lutPtr.baseAddress!
+                for y in 0..<bitmapH {
+                    let rowStart = y * bytesPerRow
+                    for x in 0..<bitmapW {
+                        buf[rowStart + x] = lutBase[Int(buf[rowStart + x])]
+                    }
+                }
+            }
+        }
+
         texture.replace(
             region: MTLRegionMake2D(ax, ay, bitmapW, bitmapH),
             mipmapLevel: 0,
