@@ -132,6 +132,13 @@ final class TerminalState: ParserSink {
     private(set) var title: String = ""
     private(set) var currentDirectory: String? = nil
 
+    /// Fired on the parser (session) queue when the child writes BEL (0x07).
+    /// Session marshals this to the main thread.
+    var onBell: (() -> Void)?
+    /// Fired on the parser queue for an OSC 9 / OSC 777 desktop-notification
+    /// escape. `title` is empty for OSC 9, which carries only a body.
+    var onNotify: ((_ title: String, _ body: String) -> Void)?
+
     private var currentFg: SIMD4<Float>
     private var currentBg: SIMD4<Float>
     private var currentAttrs: CellAttrs = []
@@ -266,7 +273,7 @@ final class TerminalState: ParserSink {
 
     func parserExecute(_ control: UInt8) {
         switch control {
-        case 0x07: break                            // BEL
+        case 0x07: onBell?()                         // BEL
         case 0x08:                                  // BS
             if cursorCol > 0 { cursorCol -= 1 }
         case 0x09:                                  // HT — next 8-col tab stop
@@ -338,6 +345,21 @@ final class TerminalState: ParserSink {
         case 7:                                 // current working directory
             if let url = URL(string: payload), url.scheme == "file" {
                 currentDirectory = url.path
+            }
+        case 9:                                 // iTerm2 desktop notification
+            // OSC 9 ; <message> — body only, no title. The "9;4;…" form is
+            // ConEmu/Windows-Terminal progress, not a notification — skip it.
+            if !payload.isEmpty && !payload.hasPrefix("4;") {
+                onNotify?("", payload)
+            }
+        case 777:                               // rxvt-unicode "notify" module
+            // OSC 777 ; notify ; <title> ; <body> — body may contain ';'.
+            let parts = payload.split(separator: ";", maxSplits: 2,
+                                      omittingEmptySubsequences: false)
+            if parts.count >= 2, parts[0] == "notify" {
+                let title = String(parts[1])
+                let body = parts.count >= 3 ? String(parts[2]) : ""
+                onNotify?(title, body)
             }
         case 133:
             handlePrompt133(payload)

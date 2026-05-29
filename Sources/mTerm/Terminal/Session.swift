@@ -13,11 +13,26 @@ final class Session {
     /// (i.e. the child shell process has exited).
     var onChildExit: (() -> Void)?
 
+    /// Called on the main thread when the child rings the terminal bell.
+    var onBell: (() -> Void)?
+
+    /// Called on the main thread for an OSC 9 / OSC 777 notification escape.
+    /// `title` is empty when the escape carried only a body (OSC 9).
+    var onNotify: ((_ title: String, _ body: String) -> Void)?
+
     init?(cols: Int, rows: Int, cwd: String? = nil) {
         guard let pty = Pty.spawnShell(cols: cols, rows: rows, cwd: cwd) else { return nil }
         self.pty = pty
         self.state = TerminalState(cols: cols, rows: rows)
         self.parser.sink = state
+        // TerminalState fires these on the session queue; hop to the main
+        // thread so UI (focus checks, posting banners) is safe.
+        state.onBell = { [weak self] in
+            DispatchQueue.main.async { self?.onBell?() }
+        }
+        state.onNotify = { [weak self] title, body in
+            DispatchQueue.main.async { self?.onNotify?(title, body) }
+        }
         startReadLoop()
     }
 

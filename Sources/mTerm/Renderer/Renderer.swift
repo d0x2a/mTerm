@@ -87,7 +87,7 @@ final class Renderer {
     init(device: MTLDevice, pixelFormat: MTLPixelFormat, scale: CGFloat,
          fontFamily: String = FontCatalog.defaultFamily,
          fontSize: Double = 14,
-         thinStrokes: Bool = true) {
+         strokeWeight: Double = 0.5) {
         self.device = device
         guard let queue = device.makeCommandQueue() else {
             fatalError("could not create Metal command queue")
@@ -101,10 +101,13 @@ final class Renderer {
         // Round the ascent to an integer so the per-row baseline lands on a
         // pixel boundary (combined with integer cellHeight + integer grid
         // origin, this is what lets us use nearest sampling on the atlas).
+        //
+        // Cell height intentionally excludes CTFontGetLeading. CoreText's
+        // "leading" is the recommended whitespace between lines for body
+        // text — it makes a terminal feel airy compared to iTerm2 / Alacritty.
         let ascent = Float(CTFontGetAscent(font)).rounded()
         let descent = Float(CTFontGetDescent(font))
-        let leading = Float(CTFontGetLeading(font))
-        let cellHeight = ceil(ascent + descent + leading)
+        let cellHeight = ceil(ascent + descent)
 
         var charM: UniChar = 0x4D
         var glyphM: CGGlyph = 0
@@ -122,7 +125,7 @@ final class Renderer {
         )
 
         self.glyphAtlas = GlyphAtlas(device: device, font: font,
-                                     thinStrokes: thinStrokes)
+                                     strokeWeight: strokeWeight)
 
         let library: MTLLibrary
         do {

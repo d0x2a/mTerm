@@ -67,7 +67,7 @@ final class TerminalView: NSView, CALayerDelegate {
     private var lastAppliedTheme: Theme = ThemeStore.currentTheme
     private var lastAppliedFontFamily: String = ThemeStore.shared.settings.fontFamily
     private var lastAppliedFontSize: Double = ThemeStore.shared.settings.fontSize
-    private var lastAppliedThinStrokes: Bool = ThemeStore.shared.settings.thinStrokes
+    private var lastAppliedStrokeWeight: Double = ThemeStore.shared.settings.strokeWeight
 
     override var wantsUpdateLayer: Bool { true }
     override var isFlipped: Bool { true }
@@ -101,11 +101,11 @@ final class TerminalView: NSView, CALayerDelegate {
         let s = ThemeStore.shared.settings
         guard s.fontFamily != lastAppliedFontFamily
             || s.fontSize != lastAppliedFontSize
-            || s.thinStrokes != lastAppliedThinStrokes
+            || s.strokeWeight != lastAppliedStrokeWeight
         else { return }
         lastAppliedFontFamily = s.fontFamily
         lastAppliedFontSize = s.fontSize
-        lastAppliedThinStrokes = s.thinStrokes
+        lastAppliedStrokeWeight = s.strokeWeight
         rebuildRenderer()
     }
 
@@ -119,7 +119,7 @@ final class TerminalView: NSView, CALayerDelegate {
             scale: scale,
             fontFamily: lastAppliedFontFamily,
             fontSize: lastAppliedFontSize,
-            thinStrokes: lastAppliedThinStrokes
+            strokeWeight: lastAppliedStrokeWeight
         )
         resizeSessionIfNeeded()
     }
@@ -555,7 +555,7 @@ final class TerminalView: NSView, CALayerDelegate {
             scale: scale,
             fontFamily: s.fontFamily,
             fontSize: s.fontSize,
-            thinStrokes: s.thinStrokes
+            strokeWeight: s.strokeWeight
         )
     }
 
@@ -587,6 +587,15 @@ final class TerminalView: NSView, CALayerDelegate {
         s?.onChildExit = { [weak self] in
             guard let self else { return }
             self.delegate?.terminalViewDidTerminate(self)
+        }
+        s?.onBell = { [weak self] in
+            guard let self else { return }
+            self.delegate?.terminalView(self, didRequestAttention: .bell)
+        }
+        s?.onNotify = { [weak self] title, body in
+            guard let self else { return }
+            let t = title.isEmpty ? nil : title
+            self.delegate?.terminalView(self, didRequestAttention: .notification(title: t, body: body))
         }
         session = s
     }
@@ -634,9 +643,9 @@ final class TerminalView: NSView, CALayerDelegate {
     private func composedHighlights(snapshot: TerminalSnapshot) -> [HighlightBand] {
         var bands: [HighlightBand] = []
 
-        // Trigger highlights only show while ⌘ is held — same affordance iTerm
-        // and Terminal.app use for "this is clickable". Drawn first so search
-        // highlights paint on top.
+        // Trigger highlights only show while ⌘ is held — same affordance
+        // iTerm and Terminal.app use for "this is clickable". Drawn first
+        // so search highlights paint on top.
         if commandHeld {
             for m in currentTriggerMatches {
                 let style: HighlightStyle

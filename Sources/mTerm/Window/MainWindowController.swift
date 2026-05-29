@@ -1,8 +1,17 @@
 import AppKit
 
+/// An attention event raised by the child process inside a terminal.
+enum TerminalAttention {
+    /// Terminal bell (BEL / `\a`).
+    case bell
+    /// OSC 9 / OSC 777 desktop-notification escape. `title` is nil for OSC 9.
+    case notification(title: String?, body: String)
+}
+
 protocol TerminalViewDelegate: AnyObject {
     func terminalView(_ view: TerminalView, didUpdate title: String, cwd: String?)
     func terminalViewDidTerminate(_ view: TerminalView)
+    func terminalView(_ view: TerminalView, didRequestAttention attention: TerminalAttention)
 }
 
 final class MainWindowController: NSWindowController, NSWindowDelegate,
@@ -248,6 +257,42 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     func terminalViewDidTerminate(_ view: TerminalView) {
         guard let tab = tabs.first(where: { $0.terminalView === view }) else { return }
         forceCloseTab(tab.id)
+    }
+
+    func terminalView(_ view: TerminalView, didRequestAttention attention: TerminalAttention) {
+        let settings = ThemeStore.shared.settings
+        guard settings.notificationsEnabled else { return }
+        guard let tab = tabs.first(where: { $0.terminalView === view }) else { return }
+
+        // The bell is the noisy one (readline rings it on completion failures
+        // too), so it has its own opt-out. OSC notifications are explicit
+        // requests from the program, so they always go through.
+        if case .bell = attention, !settings.notifyOnBell { return }
+
+        // Don't interrupt the user with what they're already looking at.
+        if settings.notifyOnlyWhenUnfocused && isTabFrontmost(tab) { return }
+
+        let process = tab.terminalView.foregroundProcess?.name
+        let title: String
+        let body: String
+        switch attention {
+        case .bell:
+            title = process ?? tab.displayTitle
+            body = "wants your attention"
+        case .notification(let t, let b):
+            title = t ?? process ?? tab.displayTitle
+            body = b
+        }
+
+        NotificationManager.shared.post(title: title, body: body, tabId: tab.id)
+    }
+
+    /// True when this tab is the one the user is actively looking at: app
+    /// frontmost, this window key, and this the selected tab.
+    private func isTabFrontmost(_ tab: Tab) -> Bool {
+        NSApp.isActive
+            && (window?.isKeyWindow ?? false)
+            && activeTabId == tab.id
     }
 
     // MARK: NSWindowDelegate close confirmation

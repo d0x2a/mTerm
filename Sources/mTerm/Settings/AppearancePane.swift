@@ -50,8 +50,16 @@ struct AppearancePane: View {
                         step: 1) {
                     Text("Size: \(Int(store.settings.fontSize)) pt")
                 }
-                Toggle("Use thin strokes",
-                       isOn: $store.settings.thinStrokes)
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text("Stroke weight")
+                        Spacer()
+                        Text(String(format: "%.2f", store.settings.strokeWeight))
+                            .foregroundColor(.secondary)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    Slider(value: $store.settings.strokeWeight, in: 0.0...1.0)
+                }
             }
 
             Section("Preview") {
@@ -61,6 +69,25 @@ struct AppearancePane: View {
             Section("Sessions") {
                 Toggle("Warn before closing a tab with a running process",
                        isOn: $store.settings.warnOnCloseWithRunningProcess)
+            }
+
+            Section {
+                Toggle("Enable notifications",
+                       isOn: $store.settings.notificationsEnabled)
+                    .onChange(of: store.settings.notificationsEnabled) { _, enabled in
+                        if enabled { NotificationManager.shared.requestAuthorizationIfNeeded() }
+                    }
+                Toggle("Notify on terminal bell",
+                       isOn: $store.settings.notifyOnBell)
+                    .disabled(!store.settings.notificationsEnabled)
+                Toggle("Only when the tab isn’t focused",
+                       isOn: $store.settings.notifyOnlyWhenUnfocused)
+                    .disabled(!store.settings.notificationsEnabled)
+            } header: {
+                Text("Notifications")
+            } footer: {
+                Text("Posts a macOS notification when a program rings the bell or "
+                     + "sends a notification escape — e.g. Claude Code waiting for your input.")
             }
         }
         .formStyle(.grouped)
