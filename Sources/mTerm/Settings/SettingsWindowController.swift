@@ -8,9 +8,9 @@ final class SettingsWindowController: NSWindowController {
         let hosting = NSHostingController(rootView: SettingsView())
         let window = SettingsWindow(contentViewController: hosting)
         window.title = "Settings"
-        window.setContentSize(NSSize(width: 520, height: 560))
+        window.setContentSize(NSSize(width: 680, height: 560))
         window.styleMask = [.titled, .closable, .resizable]
-        window.minSize = NSSize(width: 460, height: 420)
+        window.minSize = NSSize(width: 600, height: 420)
         window.isReleasedWhenClosed = false        // reuse on next ⌘,
         window.center()
         window.setFrameAutosaveName("mTerm.SettingsWindow")
