@@ -2,7 +2,7 @@
 
 A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
-> **Status:** v0.2.0 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
+> **Status:** v0.4.0 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
 
 ## Why
 
@@ -32,14 +32,16 @@ swift run -c release mTerm
 
 ## What works today
 
-- AppKit-native window with tabbed sidebar, full-screen, session restore (tabs + CWDs).
+- AppKit-native window with tabbed sidebar (drag to reorder), full-screen, session restore (tabs + CWDs). The sidebar and split divider tint to the active theme.
 - Metal-rendered terminal view with pixel-snapped glyph atlas — crisp text at all sizes, no GPU filtering blur.
 - xterm-256color compatibility for vim/neovim/htop/fzf/less/git pagers. 24-bit true color. Alt-screen, scrollback, mouse tracking.
 - Scrollback search: plain text by default, regex via ⌥⌘F, smart-case.
 - Shell integration for **zsh** via OSC 133: gutter prompt markers (color-coded by exit status), jump to previous/next prompt with ⌘↑ / ⌘↓.
-- Themes: Tomorrow Night, Solarized (light + dark), Nord, Dracula, Gruvbox Dark, plus mTerm's own light + dark. Auto light/dark switching follows the system appearance.
+- Themes: Tomorrow Night, Solarized (light + dark), Nord, Dracula, Gruvbox Dark, plus mTerm's own light + dark. Import any iTerm2 `.itermcolors` file. Auto light/dark switching follows the system appearance.
+- macOS notifications for terminal attention events (bell, OSC 9 / OSC 777) — configurable in Settings.
 - Triggers engine with built-in regex rules for URLs (⌘-click to open), file paths (⌘-click to reveal), git SHAs, IPv4 addresses.
 - Close-confirmation when a foreground process is running (`vim`, `ssh`, etc.) — togglable in Settings.
+- Settings window organized into Appearance / General / Notifications panes.
 
 ## Not yet (tracked for v1)
 
@@ -47,7 +49,7 @@ swift run -c release mTerm
 - tmux `-CC` control mode.
 - Profiles (named shell configurations).
 - Triggers editor UI + `runCommand` action.
-- Multi-pane Settings with search.
+- Settings search.
 - Configurable scrollback size from Settings.
 
 ## Keyboard shortcuts

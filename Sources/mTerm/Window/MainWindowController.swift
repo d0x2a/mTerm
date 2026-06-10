@@ -62,6 +62,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
         let contentItem = NSSplitViewItem(viewController: contentVC)
 
+        splitVC.splitView = ThemedSplitView()
         splitVC.splitViewItems = [sidebarItem, contentItem]
         splitVC.splitView.autosaveName = "mTerm.Sidebar"
         window.contentViewController = splitVC
@@ -361,5 +362,55 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         var seen = Set<String>()
         let unique = names.filter { seen.insert($0).inserted }
         return unique.joined(separator: ", ")
+    }
+}
+
+/// Split view whose divider tracks the active theme. The system separator
+/// reads as too bright over a dark terminal, so we derive the divider from
+/// the theme background and keep it nearly blended on dark themes.
+private final class ThemedSplitView: NSSplitView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isVertical = true       // side-by-side panes (a vertical divider line)
+        dividerStyle = .thin    // NSSplitViewController's default; plain NSSplitView is .thick
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(themeDidChange),
+            name: .mTermThemeDidChange, object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func themeDidChange() {
+        needsDisplay = true
+        // Mark the divider strip itself dirty — invalidating the whole view
+        // doesn't reliably repaint the divider region on its own.
+        setNeedsDisplay(dividerRect)
+    }
+
+    /// The 1pt vertical strip between the two panes.
+    private var dividerRect: NSRect {
+        guard let first = arrangedSubviews.first else { return bounds }
+        return NSRect(x: first.frame.maxX, y: 0,
+                      width: dividerThickness, height: bounds.height)
+    }
+
+    override func drawDivider(in rect: NSRect) {
+        themedDividerColor.setFill()
+        rect.fill()
+    }
+
+    private var themedDividerColor: NSColor {
+        let theme = ThemeStore.currentTheme
+        let bg = theme.background
+        // Dark themes blend almost fully into the background; light themes get
+        // a slightly stronger line so the divider stays perceptible.
+        let isDark = theme.appearance == .dark
+        let amount: Float = isDark ? 0.05 : 0.06
+        let target: Float = isDark ? 1.0 : 0.0
+        func mix(_ c: Float) -> CGFloat { CGFloat(c + (target - c) * amount) }
+        return NSColor(srgbRed: mix(bg.x), green: mix(bg.y), blue: mix(bg.z),
+                       alpha: CGFloat(bg.w))
     }
 }
