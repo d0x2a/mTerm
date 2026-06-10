@@ -32,7 +32,10 @@ final class SidebarView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        applyThemeBackground()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(themeDidChange),
+            name: .mTermThemeDidChange, object: nil)
 
         stack.orientation = .vertical
         stack.spacing = 0
@@ -86,6 +89,28 @@ final class SidebarView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func themeDidChange() { applyThemeBackground() }
+
+    /// Tints the sidebar so it reads as a distinct panel beside the terminal:
+    /// a light theme's sidebar goes slightly darker than its background, while
+    /// a dark theme's goes slightly lighter (pushing a dark bg further toward
+    /// black just muddies it). The shift is small on purpose.
+    private func applyThemeBackground() {
+        let theme = ThemeStore.currentTheme
+        let bg = theme.background
+        // Blend toward black (light themes) or white (dark themes) by a small
+        // amount so the panel separates without looking like a different color.
+        let amount: Float = 0.06
+        let target: Float = theme.appearance == .dark ? 1.0 : 0.0
+        func mix(_ c: Float) -> CGFloat { CGFloat(c + (target - c) * amount) }
+        let color = NSColor(
+            srgbRed: mix(bg.x), green: mix(bg.y), blue: mix(bg.z),
+            alpha: CGFloat(bg.w))
+        layer?.backgroundColor = color.cgColor
+    }
 
     func update(tabs: [(id: UUID, title: String)], activeId: UUID?) {
         rows.forEach { $0.removeFromSuperview() }

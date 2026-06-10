@@ -136,6 +136,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func closeActiveTab(_ sender: Any?) {
+        // If an auxiliary window (e.g. Settings) is key, ⌘W closes that window
+        // rather than a terminal tab in the background main window.
+        if let key = NSApp.keyWindow, !(key.windowController is MainWindowController) {
+            key.performClose(sender)
+            return
+        }
         activeController()?.closeActiveTab()
     }
 
@@ -156,6 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = activeController()
         switch menuItem.action {
         case #selector(closeActiveTab(_:)):
+            // Keep ⌘W enabled for a key auxiliary window so it can close itself.
+            if let key = NSApp.keyWindow, !(key.windowController is MainWindowController) {
+                return key.styleMask.contains(.closable)
+            }
             return (controller?.tabCount ?? 0) > 0
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)):
             return (controller?.tabCount ?? 0) > 1
