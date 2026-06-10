@@ -6,12 +6,30 @@ final class Pty {
     let masterFd: Int32
     let pid: pid_t
 
+    // All input (keystrokes + pastes) funnels through this serial queue. A
+    // large paste can fill the kernel's PTY input buffer, at which point our
+    // non-blocking write() returns EAGAIN; rather than dropping the rest (the
+    // old truncation bug) we park it in `pending` and flush via `writeSource`
+    // once the fd drains. Kept off the main thread (no UI jank) and off the
+    // session read queue (blocking there would deadlock the child's output).
+    private let writeQueue = DispatchQueue(label: "mterm.pty.write", qos: .userInteractive)
+    private var pending = [UInt8]()
+    private var pendingOffset = 0
+    private var writeSource: DispatchSourceWrite?
+    private var writeSourceActive = false
+
     private init(masterFd: Int32, pid: pid_t) {
         self.masterFd = masterFd
         self.pid = pid
     }
 
     deinit {
+        // Releasing a suspended dispatch source crashes, so resume it (if it
+        // was parked) before cancelling.
+        if let src = writeSource {
+            if !writeSourceActive { src.resume() }
+            src.cancel()
+        }
         close(masterFd)
         kill(pid, SIGHUP)
     }
@@ -42,19 +60,68 @@ final class Pty {
 
     func write(_ bytes: [UInt8]) {
         guard !bytes.isEmpty else { return }
-        bytes.withUnsafeBufferPointer { ptr in
-            var remaining = ptr.count
-            var offset = 0
-            while remaining > 0 {
-                let n = Darwin.write(masterFd, ptr.baseAddress! + offset, remaining)
-                if n < 0 {
-                    if errno == EINTR { continue }
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            // Drop the already-sent prefix so the backlog doesn't grow without
+            // bound across many writes.
+            if self.pendingOffset > 0 {
+                self.pending.removeFirst(self.pendingOffset)
+                self.pendingOffset = 0
+            }
+            self.pending.append(contentsOf: bytes)
+            self.flushPending()
+        }
+    }
+
+    /// Writes as much of `pending` as the kernel will take. On EAGAIN it leaves
+    /// the remainder parked and resumes `writeSource` to retry once the fd is
+    /// writable again. Must run on `writeQueue`.
+    private func flushPending() {
+        while pendingOffset < pending.count {
+            let n = pending.withUnsafeBufferPointer { ptr in
+                Darwin.write(masterFd, ptr.baseAddress! + pendingOffset,
+                             pending.count - pendingOffset)
+            }
+            if n > 0 {
+                pendingOffset += n
+            } else if n < 0 {
+                switch errno {
+                case EINTR:
+                    continue
+                case EAGAIN, EWOULDBLOCK:
+                    resumeWriteSource()
+                    return
+                default:
+                    // Unrecoverable (e.g. fd closed); discard the backlog.
+                    pending.removeAll(keepingCapacity: false)
+                    pendingOffset = 0
+                    suspendWriteSource()
                     return
                 }
-                offset += n
-                remaining -= n
+            } else {
+                return
             }
         }
+        pending.removeAll(keepingCapacity: false)
+        pendingOffset = 0
+        suspendWriteSource()
+    }
+
+    private func resumeWriteSource() {
+        if writeSource == nil {
+            let src = DispatchSource.makeWriteSource(fileDescriptor: masterFd, queue: writeQueue)
+            src.setEventHandler { [weak self] in self?.flushPending() }
+            writeSource = src   // sources start suspended
+        }
+        guard !writeSourceActive else { return }
+        writeSourceActive = true
+        writeSource?.resume()
+    }
+
+    private func suspendWriteSource() {
+        guard writeSourceActive else { return }
+        writeSourceActive = false
+        writeSource?.suspend()
     }
 
     func resize(cols: Int, rows: Int) {
