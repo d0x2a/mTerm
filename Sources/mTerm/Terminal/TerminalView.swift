@@ -31,6 +31,7 @@ final class TerminalView: NSView, CALayerDelegate {
     private var lastSnapshotRows: Int = 1
     private var lastReportedTitle: String = ""
     private var lastReportedCwd: String? = nil
+    private var lastReportedFgProcess: String? = nil
     private var lastInputTime: CFTimeInterval = CACurrentMediaTime()
 
     private struct ActiveSelection {
@@ -195,9 +196,44 @@ final class TerminalView: NSView, CALayerDelegate {
                 end:    (col: lastCol, row: coord.row),
                 dragging: false
             )
+        } else if event.clickCount == 2 {
+            // Double-click: select the word under the cursor.
+            activeSelection = wordSelection(at: coord)
         } else {
             activeSelection = ActiveSelection(anchor: coord, end: coord, dragging: true)
         }
+    }
+
+    /// Expands a double-clicked cell to its surrounding word. A "word" is a run
+    /// of word characters (alphanumerics plus punctuation common in paths, URLs,
+    /// and identifiers); clicking any other character selects just that cell.
+    private func wordSelection(at coord: (col: Int, row: Int)) -> ActiveSelection {
+        let single = ActiveSelection(anchor: coord, end: coord, dragging: false)
+        guard let session else { return single }
+        let snapshot = session.snapshot(scrollOffset: scrollOffset)
+        let cols = snapshot.cols
+        guard coord.row >= 0, coord.row < snapshot.rows, cols > 0 else { return single }
+
+        func isWord(_ col: Int) -> Bool {
+            isWordChar(snapshot.cells[coord.row * cols + col].scalar)
+        }
+
+        let clicked = min(coord.col, cols - 1)
+        guard isWord(clicked) else {
+            return ActiveSelection(anchor: (col: clicked, row: coord.row),
+                                   end: (col: clicked, row: coord.row), dragging: false)
+        }
+        var start = clicked
+        while start > 0, isWord(start - 1) { start -= 1 }
+        var end = clicked
+        while end < cols - 1, isWord(end + 1) { end += 1 }
+        return ActiveSelection(anchor: (col: start, row: coord.row),
+                               end: (col: end, row: coord.row), dragging: false)
+    }
+
+    private func isWordChar(_ s: Unicode.Scalar) -> Bool {
+        if CharacterSet.alphanumerics.contains(s) { return true }
+        return "_-./~:+@%".unicodeScalars.contains(s)
     }
 
     private func triggerMatch(at coord: (col: Int, row: Int)) -> TriggerMatch? {
@@ -248,8 +284,10 @@ final class TerminalView: NSView, CALayerDelegate {
     override func mouseUp(with event: NSEvent) {
         guard var sel = activeSelection else { return }
         sel.dragging = false
-        // A pure click (no drag) clears the selection.
-        if sel.anchor == sel.end {
+        // A pure single click (no drag) clears the selection. Double/triple-click
+        // word/line selections are intentional and kept even when they cover a
+        // single cell (so anchor == end).
+        if event.clickCount == 1 && sel.anchor == sel.end {
             activeSelection = nil
         } else {
             activeSelection = sel
@@ -621,13 +659,17 @@ final class TerminalView: NSView, CALayerDelegate {
         if scrollOffset > lastScrollbackLines {
             scrollOffset = lastScrollbackLines
         }
+        let fgProcess = session?.foregroundProcess()?.name
         if snapshot.title != lastReportedTitle
-            || snapshot.currentDirectory != lastReportedCwd {
+            || snapshot.currentDirectory != lastReportedCwd
+            || fgProcess != lastReportedFgProcess {
             lastReportedTitle = snapshot.title
             lastReportedCwd = snapshot.currentDirectory
+            lastReportedFgProcess = fgProcess
             delegate?.terminalView(self,
                                    didUpdate: snapshot.title,
-                                   cwd: snapshot.currentDirectory)
+                                   cwd: snapshot.currentDirectory,
+                                   foregroundProcess: fgProcess)
         }
         currentTriggerMatches = triggerEvaluator.evaluate(snapshot: snapshot)
 

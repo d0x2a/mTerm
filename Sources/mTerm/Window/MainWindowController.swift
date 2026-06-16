@@ -9,7 +9,7 @@ enum TerminalAttention {
 }
 
 protocol TerminalViewDelegate: AnyObject {
-    func terminalView(_ view: TerminalView, didUpdate title: String, cwd: String?)
+    func terminalView(_ view: TerminalView, didUpdate title: String, cwd: String?, foregroundProcess: String?)
     func terminalViewDidTerminate(_ view: TerminalView)
     func terminalView(_ view: TerminalView, didRequestAttention attention: TerminalAttention)
 }
@@ -243,9 +243,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
 
     // MARK: TerminalViewDelegate
 
-    func terminalView(_ view: TerminalView, didUpdate title: String, cwd: String?) {
+    func terminalView(_ view: TerminalView, didUpdate title: String, cwd: String?, foregroundProcess: String?) {
         guard let tab = tabs.first(where: { $0.terminalView === view }) else { return }
-        let newDisplay = basename(of: cwd) ?? (title.isEmpty ? "mTerm" : title)
+        let newDisplay: String
+        if foregroundProcess != nil && !title.isEmpty {
+            // A program is running and has set an OSC title (e.g. ssh showing remote host).
+            newDisplay = title
+        } else {
+            // Idle shell: prefer the local cwd, fall back to OSC title or default.
+            newDisplay = basename(of: cwd) ?? (title.isEmpty ? "mTerm" : title)
+        }
         if newDisplay != tab.displayTitle {
             tab.displayTitle = newDisplay
             refreshSidebar()

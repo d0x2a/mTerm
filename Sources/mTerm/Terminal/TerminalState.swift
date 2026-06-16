@@ -311,6 +311,10 @@ final class TerminalState: ParserSink {
             let c = params.count >= 2 ? max(1, params[1]) : 1
             cursorRow = min(rows - 1, r - 1)
             cursorCol = min(cols - 1, c - 1)
+        case 0x64:                                  // 'd' VPA — absolute row
+            cursorRow = max(0, min(rows - 1, max(1, p0) - 1))
+        case 0x50:                                  // 'P' DCH — delete chars
+            deleteChars(max(1, p0))
         case 0x4A:                                  // 'J' ED
             eraseDisplay(mode: p0)
         case 0x4B:                                  // 'K' EL
@@ -711,6 +715,20 @@ final class TerminalState: ParserSink {
             for i in 0..<cells.count { cells[i] = Cell() }
         default:
             break
+        }
+    }
+
+    /// DCH: deletes `count` cells at the cursor, shifting the rest of the line
+    /// left and backfilling the tail with blanks.
+    private func deleteChars(_ count: Int) {
+        let n = min(count, cols - cursorCol)
+        guard n > 0 else { return }
+        let base = cursorRow * cols
+        for c in cursorCol..<(cols - n) {
+            cells[base + c] = cells[base + c + n]
+        }
+        for c in (cols - n)..<cols {
+            cells[base + c] = Cell()
         }
     }
 

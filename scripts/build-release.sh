@@ -37,7 +37,7 @@ set -euo pipefail
 : "${DEVELOPER_ID_APPLICATION:?env var must be set (see header)}"
 : "${NOTARY_PROFILE:?env var must be set (see header)}"
 BUNDLE_ID="${BUNDLE_ID:-com.d0x2a.mTerm}"
-VERSION="${VERSION:-0.5.1}"
+VERSION="${VERSION:-0.5.2}"
 UNIVERSAL="${UNIVERSAL:-0}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
