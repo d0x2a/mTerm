@@ -2,40 +2,18 @@
 # Builds a signed + notarized + stapled mTerm.app and mTerm-<version>.dmg
 # under ./build/.
 #
-# One-time setup
-# --------------
-#   1. Install your Developer ID Application certificate into the login
-#      keychain (download .cer from developer.apple.com → Certificates).
-#   2. Store notarytool credentials so we don't have to ship a password
-#      through env vars:
-#
-#        xcrun notarytool store-credentials mterm-notary \
-#            --apple-id <your-apple-id> \
-#            --team-id <TEAM_ID> \
-#            --password <app-specific-password>
-#
-#      (App-Specific Password lives at appleid.apple.com → Sign-In and
-#      Security → App-Specific Passwords.)
-#
-# Required env vars
-# -----------------
-#   DEVELOPER_ID_APPLICATION   Full signing identity string, e.g.
-#                              "Developer ID Application: Jane Doe (ABCD123456)"
-#   NOTARY_PROFILE             Name passed to `notarytool store-credentials`,
-#                              e.g. mterm-notary.
-#
 # Optional env vars
 # -----------------
-#   BUNDLE_ID                  Defaults to com.d0x2a.mTerm.
-#   VERSION                    Defaults to 0.5.1. Goes into both
-#                              CFBundleShortVersionString and CFBundleVersion.
-#   UNIVERSAL                  If set to 1, builds a universal arm64+x86_64
-#                              binary. Default: current host arch only.
+#   BUNDLE_ID    Defaults to com.d0x2a.mTerm.
+#   VERSION      Defaults to current version. Goes into both
+#                CFBundleShortVersionString and CFBundleVersion.
+#   UNIVERSAL    If set to 1, builds a universal arm64+x86_64 binary.
+#                Default: current host arch only.
 
 set -euo pipefail
 
-: "${DEVELOPER_ID_APPLICATION:?env var must be set (see header)}"
-: "${NOTARY_PROFILE:?env var must be set (see header)}"
+DEVELOPER_ID_APPLICATION="${DEVELOPER_ID_APPLICATION:-Developer ID Application: Dox2A Labs LLC (7JD669BMB4)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-mterm-notary}"
 BUNDLE_ID="${BUNDLE_ID:-com.d0x2a.mTerm}"
 VERSION="${VERSION:-0.5.2}"
 UNIVERSAL="${UNIVERSAL:-0}"
