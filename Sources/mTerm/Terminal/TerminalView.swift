@@ -65,6 +65,10 @@ final class TerminalView: NSView, CALayerDelegate {
     private var currentTriggerMatches: [TriggerMatch] = []
     private var commandHeld: Bool = false
     private var lastMouseCoord: (col: Int, row: Int)? = nil
+    /// Last pointer location in window coordinates, used to detect when the
+    /// pointer is over the split-view divider's grab zone (which overlaps our
+    /// left edge) so we don't clobber its resize cursor with the I-beam.
+    private var lastMouseWindowPoint: NSPoint? = nil
     private var lastAppliedTheme: Theme = ThemeStore.currentTheme
     private var lastAppliedFontFamily: String = ThemeStore.shared.settings.fontFamily
     private var lastAppliedFontSize: Double = ThemeStore.shared.settings.fontSize
@@ -132,6 +136,10 @@ final class TerminalView: NSView, CALayerDelegate {
         layer.allowsNextDrawableTimeout = false
         layer.needsDisplayOnBoundsChange = true
         layer.isOpaque = true            // we render fully-opaque frames
+        // Present drawables inside the current CA transaction so a frame is
+        // never shown at a size that disagrees with the layer's geometry —
+        // this is what keeps live resize (window + sidebar divider) smooth.
+        layer.presentsWithTransaction = true
         return layer
     }
 
@@ -160,6 +168,11 @@ final class TerminalView: NSView, CALayerDelegate {
         super.setFrameSize(newSize)
         updateDrawableSize()
         resizeSessionIfNeeded()
+        // Present immediately at the new size. With `presentsWithTransaction`
+        // the present lands in the same CA transaction as the layout change,
+        // so the divider/window drag stays smooth instead of stretching the
+        // previous frame until the next display-link tick.
+        renderFrame()
     }
 
     // MARK: input
@@ -297,11 +310,13 @@ final class TerminalView: NSView, CALayerDelegate {
     override func mouseMoved(with event: NSEvent) {
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
         lastMouseCoord = coord
+        lastMouseWindowPoint = event.locationInWindow
         updateCursorAffordance()
     }
 
     override func mouseExited(with event: NSEvent) {
         lastMouseCoord = nil
+        lastMouseWindowPoint = nil
         commandHeld = false
         updateCursorAffordance()
     }
@@ -327,6 +342,14 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     private func updateCursorAffordance() {
+        // When the pointer sits over the split-view divider's enlarged grab
+        // zone (which overlaps our left edge), let that resize cursor stand
+        // instead of forcing the I-beam over it.
+        if let p = lastMouseWindowPoint,
+           window?.contentView?.hitTest(p) is NSSplitView {
+            NSCursor.resizeLeftRight.set()
+            return
+        }
         if commandHeld,
            let coord = lastMouseCoord,
            let match = triggerMatch(at: coord),
@@ -600,12 +623,17 @@ final class TerminalView: NSView, CALayerDelegate {
     private func updateDrawableSize() {
         guard let metalLayer = layer as? CAMetalLayer, let window else { return }
         let scale = window.backingScaleFactor
-        metalLayer.contentsScale = scale
         let size = bounds.size
+        // Geometry changes during a live drag must not trigger implicit CALayer
+        // animations — those interpolate the drawable size and read as lag.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(
             width: max(1, size.width * scale),
             height: max(1, size.height * scale)
         )
+        CATransaction.commit()
     }
 
     private func gridDimensions() -> (cols: Int, rows: Int)? {
@@ -644,10 +672,18 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     @objc private func tick(_ sender: CADisplayLink) {
-        guard let metalLayer = layer as? CAMetalLayer, let renderer else { return }
         ensureSession()
         reconcileThemeIfChanged()
         reconcileFontIfChanged()
+        renderFrame()
+    }
+
+    /// Builds the latest snapshot and presents one frame. Driven by the display
+    /// link each tick, but also invoked synchronously from `setFrameSize` so a
+    /// resize presents a correctly-sized frame in the same layout pass instead
+    /// of letting Core Animation stretch the stale drawable until the next tick.
+    private func renderFrame() {
+        guard let metalLayer = layer as? CAMetalLayer, let renderer else { return }
         let snapshot = session?.snapshot(scrollOffset: scrollOffset)
             ?? TerminalSnapshot(cols: 1, rows: 1, cells: [Cell()],
                                 cursorCol: 0, cursorRow: 0, cursorVisible: false,

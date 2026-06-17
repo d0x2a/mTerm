@@ -25,7 +25,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
 
     private let sidebar = SidebarView()
     private let contentContainer = NSView()
-    private let splitVC = NSSplitViewController()
+    private let splitVC = WideDividerSplitViewController()
 
     init(initialCwd: String? = nil) {
         let window = NSWindow(
@@ -372,10 +372,33 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     }
 }
 
+/// Split view controller that enlarges the grab area around the thin divider.
+/// The drawn divider is only 1pt and nearly blends into the terminal, which
+/// makes the resize handle very hard to land on. We keep the look but widen the
+/// region that initiates a drag to a comfortable target on either side.
+private final class WideDividerSplitViewController: NSSplitViewController {
+    override func splitView(_ splitView: NSSplitView,
+                            effectiveRect proposedEffectiveRect: NSRect,
+                            forDrawnRect drawnRect: NSRect,
+                            ofDividerAt dividerIndex: Int) -> NSRect {
+        let margin = ThemedSplitView.grabMargin
+        var rect = proposedEffectiveRect
+        rect.origin.x -= margin
+        rect.size.width += margin * 2
+        return rect
+    }
+}
+
 /// Split view whose divider tracks the active theme. The system separator
 /// reads as too bright over a dark terminal, so we derive the divider from
 /// the theme background and keep it nearly blended on dark themes.
 private final class ThemedSplitView: NSSplitView {
+    /// Half-width (in points) of the grab/cursor zone on each side of the drawn
+    /// divider. Shared with the controller's `effectiveRect` so the region that
+    /// initiates a drag, the region that routes clicks here, and the region that
+    /// shows the resize cursor all agree.
+    static let grabMargin: CGFloat = 4
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         isVertical = true       // side-by-side panes (a vertical divider line)
@@ -401,6 +424,30 @@ private final class ThemedSplitView: NSSplitView {
         guard let first = arrangedSubviews.first else { return bounds }
         return NSRect(x: first.frame.maxX, y: 0,
                       width: dividerThickness, height: bounds.height)
+    }
+
+    /// The widened interaction zone centered on the drawn divider.
+    private var grabRect: NSRect {
+        let d = dividerRect
+        return NSRect(x: d.midX - Self.grabMargin, y: 0,
+                      width: Self.grabMargin * 2, height: bounds.height)
+    }
+
+    /// Claim clicks landing in the grab zone so the split view (not the flush
+    /// sidebar/terminal subview underneath) receives the mouseDown and starts
+    /// its native divider drag. Without this, the enlarged `effectiveRect` is
+    /// moot — the subviews swallow the event before the divider ever sees it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if grabRect.contains(local) { return self }
+        return super.hitTest(point)
+    }
+
+    /// Show the left/right resize cursor across the whole grab zone, not just
+    /// the 1pt drawn line.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(grabRect, cursor: .resizeLeftRight)
     }
 
     override func drawDivider(in rect: NSRect) {

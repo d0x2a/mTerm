@@ -386,7 +386,13 @@ final class Renderer {
         }
 
         enc.endEncoding()
-        cb.present(drawable)
+        // The layer uses `presentsWithTransaction`, so the present must be
+        // committed by us inside the current CA transaction rather than handed
+        // to Core Animation asynchronously: schedule the work, wait for it, then
+        // present in-line. This keeps frames in lockstep with layer geometry
+        // during live resize.
         cb.commit()
+        cb.waitUntilScheduled()
+        drawable.present()
     }
 }
