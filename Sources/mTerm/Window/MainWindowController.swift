@@ -203,10 +203,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     // MARK: title helpers
 
     private func displayWindowTitle(for tab: Tab) -> String {
-        if let cwd = tab.terminalView.currentDirectory, !cwd.isEmpty {
-            return foldHome(cwd)
+        let caption = tab.displayTitle
+        guard let cwd = tab.terminalView.currentDirectory, !cwd.isEmpty else {
+            return caption
         }
-        return tab.displayTitle
+        let path = foldHome(cwd)
+        // Don't repeat the caption when it's just the directory name (the common
+        // idle-shell case, e.g. "~/source/mTerm — mTerm").
+        if caption.isEmpty || caption == basename(of: cwd) { return path }
+        return "\(path) — \(caption)"
     }
 
     private func foldHome(_ cwd: String) -> String {
