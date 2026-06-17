@@ -104,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.last?.keyEquivalent = "\u{1b}"
+        alert.appendKeyEquivalentHints()
+        alert.enableButtonKeyboardNavigation()
 
         if let host {
             alert.beginSheetModal(for: host) { response in

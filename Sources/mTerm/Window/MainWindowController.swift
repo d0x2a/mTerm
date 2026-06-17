@@ -338,6 +338,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         alert.addButton(withTitle: "Close Tab")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.last?.keyEquivalent = "\u{1b}" // Escape
+        alert.appendKeyEquivalentHints()
+        alert.enableButtonKeyboardNavigation()
         guard let window else {
             then(alert.runModal() == .alertFirstButtonReturn)
             return
@@ -360,6 +362,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         alert.addButton(withTitle: "Close Window")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.last?.keyEquivalent = "\u{1b}"
+        alert.appendKeyEquivalentHints()
+        alert.enableButtonKeyboardNavigation()
         guard let window else {
             then(alert.runModal() == .alertFirstButtonReturn)
             return
