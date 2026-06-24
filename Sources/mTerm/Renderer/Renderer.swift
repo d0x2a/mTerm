@@ -280,7 +280,12 @@ final class Renderer {
                 // Glyph color flips to the cell's bg ONLY when a focused filled
                 // cursor is drawn on top of it (the classic inverted look).
                 let invertGlyph = isCursor && focused && cursorOn
-                let glyphFg = invertGlyph ? cell.bg : cell.fg
+                var glyphFg = invertGlyph ? cell.bg : cell.fg
+                // Faint (SGR 2): blend the foreground toward the background,
+                // matching how iTerm2 renders dimmed text (e.g. ghost text).
+                if cell.attrs.contains(.faint) {
+                    glyphFg = mix(glyphFg, cell.bg, t: 0.5)
+                }
                 glyphs.append(CellInstance(
                     glyphPos: glyphPos,
                     glyphSize: entry.atlasSize,

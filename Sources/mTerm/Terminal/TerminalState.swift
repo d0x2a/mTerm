@@ -7,6 +7,7 @@ struct CellAttrs: OptionSet {
     static let italic    = CellAttrs(rawValue: 1 << 1)
     static let underline = CellAttrs(rawValue: 1 << 2)
     static let inverse   = CellAttrs(rawValue: 1 << 3)
+    static let faint     = CellAttrs(rawValue: 1 << 4)
 }
 
 struct Cell {
@@ -759,10 +760,11 @@ final class TerminalState: ParserSink {
                 currentBg = theme.background
                 currentAttrs = []
             case 1:  currentAttrs.insert(.bold)
+            case 2:  currentAttrs.insert(.faint)
             case 3:  currentAttrs.insert(.italic)
             case 4:  currentAttrs.insert(.underline)
             case 7:  currentAttrs.insert(.inverse)
-            case 22: currentAttrs.remove(.bold)
+            case 22: currentAttrs.remove(.bold); currentAttrs.remove(.faint)
             case 23: currentAttrs.remove(.italic)
             case 24: currentAttrs.remove(.underline)
             case 27: currentAttrs.remove(.inverse)
