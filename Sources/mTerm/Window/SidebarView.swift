@@ -255,6 +255,9 @@ final class TabRowView: NSView, NSDraggingSource {
         label.maximumNumberOfLines = 1
         label.usesSingleLineMode = true
         label.translatesAutoresizingMaskIntoConstraints = false
+        // The title is the only thing in the row that may shrink: a long one
+        // must truncate rather than push the badge past the trailing edge.
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         badgeLabel.stringValue = badge ?? ""
         badgeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
@@ -262,6 +265,8 @@ final class TabRowView: NSView, NSDraggingSource {
         badgeLabel.alignment = .right
         badgeLabel.isHidden = badge == nil
         badgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        badgeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        badgeLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         closeBtn.title = ""
         closeBtn.image = NSImage(systemSymbolName: "xmark",
