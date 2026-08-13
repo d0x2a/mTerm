@@ -28,13 +28,22 @@ enum ShellIntegration {
     /// at the (now empty) directory, so every new tab spawned a zsh that found
     /// no `$ZDOTDIR/.zshrc` and therefore sourced *none* of the user's startup
     /// files — no oh-my-zsh, no ~/.zprofile, no PATH.
-    private static var zdotdir: URL? {
+    private static var supportDir: URL? {
         let fm = FileManager.default
         guard let appSupport = fm.urls(for: .applicationSupportDirectory,
                                        in: .userDomainMask).first else { return nil }
-        return appSupport
-            .appendingPathComponent("mTerm", isDirectory: true)
-            .appendingPathComponent("zdotdir", isDirectory: true)
+        return appSupport.appendingPathComponent("mTerm", isDirectory: true)
+    }
+
+    private static var zdotdir: URL? {
+        supportDir?.appendingPathComponent("zdotdir", isDirectory: true)
+    }
+
+    /// Scratch history files, one per live tab. Created and torn down by the
+    /// wrapper itself — the app never touches them, which keeps the shell the
+    /// only writer and avoids racing it on tab close.
+    private static var historyDir: URL? {
+        supportDir?.appendingPathComponent("history", isDirectory: true)
     }
 
     static func install() {
@@ -90,16 +99,25 @@ enum ShellIntegration {
     }
 
     private static func writeWrapper(to dir: URL, zshrc: URL) -> Bool {
+        guard let history = historyDir else { return false }
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try script.write(to: zshrc, atomically: true, encoding: .utf8)
+            try script(historyDir: history.path).write(to: zshrc, atomically: true, encoding: .utf8)
             return true
         } catch {
             return false
         }
     }
 
-    private static let script = #"""
+    /// Wraps `path` in single quotes for safe interpolation into the script —
+    /// the default location contains a space ("Application Support").
+    private static func shellQuote(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func script(historyDir: String) -> String {
+        let historyDirLiteral = shellQuote(historyDir)
+        return #"""
     # mTerm shell integration wrapper.
     # Restore the user's real ZDOTDIR so subshells and prompt expansions
     # behave normally.
@@ -110,11 +128,59 @@ enum ShellIntegration {
     fi
     unset MTERM_USER_ZDOTDIR
 
-    # /etc/zshrc runs before this file and resolves ${ZDOTDIR:-$HOME} while
-    # ZDOTDIR still points at our wrapper directory, so HISTFILE currently aims
-    # there — stranding mTerm's history somewhere no other terminal looks. Put
-    # it back before the user's own rc files run, so they keep the last word.
-    HISTFILE="${ZDOTDIR:-$HOME}/.zsh_history"
+    # Per-tab history.
+    #
+    # HISTFILE has to be set here no matter what: /etc/zshrc runs before this
+    # file and resolves ${ZDOTDIR:-$HOME} while ZDOTDIR still points at our
+    # wrapper directory, so it currently aims somewhere no other terminal looks.
+    #
+    # Rather than just pointing it back at the real history, give each tab its
+    # own scratch file. oh-my-zsh turns on `share_history`, which otherwise
+    # imports every tab's commands into every other tab as they're typed. The
+    # scratch file starts *empty*, so zsh only ever appends this tab's own
+    # commands to it; the real history is layered into memory further down with
+    # `fc -R`, which doesn't get written back. On exit the tab's commands are
+    # folded into the real history and the scratch file is deleted.
+    __mterm_hist_shared="${ZDOTDIR:-$HOME}/.zsh_history"
+    __mterm_hist_dir=\#(historyDirLiteral)
+    __mterm_hist_file=""
+    if mkdir -p "$__mterm_hist_dir" 2>/dev/null; then
+        # Fold back anything left by a tab that died without running its exit
+        # hook (crash, kill -9). Claim by rename first so two tabs starting at
+        # once can't merge the same file twice. Our own $$ is fair game — we
+        # haven't created this tab's file yet, so a match is a dead tab whose
+        # pid got recycled.
+        #
+        # In a function purely so `local_options` can scope null_glob: this runs
+        # before the user's rc files, when EXTENDED_GLOB is off and an empty
+        # directory would otherwise abort the whole wrapper with "no matches
+        # found" — taking oh-my-zsh down with it.
+        __mterm_hist_sweep() {
+            setopt local_options null_glob
+            local f pid
+            for f in "$__mterm_hist_dir"/*.zsh_history; do
+                [[ -f "$f" ]] || continue
+                pid=${${f:t}%%.*}
+                if [[ "$pid" != "$$" ]] && kill -0 "$pid" 2>/dev/null; then
+                    continue
+                fi
+                if mv "$f" "$f.merging" 2>/dev/null; then
+                    cat "$f.merging" >> "$__mterm_hist_shared" 2>/dev/null
+                    rm -f "$f.merging"
+                fi
+            done
+        }
+        __mterm_hist_sweep
+        unset -f __mterm_hist_sweep
+
+        __mterm_hist_file="$__mterm_hist_dir/$$.zsh_history"
+        : >| "$__mterm_hist_file" 2>/dev/null || __mterm_hist_file=""
+    fi
+    if [[ -n "$__mterm_hist_file" ]]; then
+        HISTFILE="$__mterm_hist_file"
+    else
+        HISTFILE="$__mterm_hist_shared"
+    fi
 
     # Re-source the user's startup files that zsh skipped because we
     # hijacked ZDOTDIR. /etc/zshenv and /etc/zprofile already ran
@@ -127,6 +193,22 @@ enum ShellIntegration {
     [[ -r "$__mterm_dir/.zprofile" ]] && source "$__mterm_dir/.zprofile"
     [[ -r "$__mterm_dir/.zshrc"    ]] && source "$__mterm_dir/.zshrc"
     unset __mterm_dir
+
+    # Seed this tab from the real history and arrange to fold its own commands
+    # back in on exit. Deliberately after the user's rc files: `fc -R` fills
+    # memory up to HISTSIZE, and reading before oh-my-zsh raises it would
+    # truncate the seed to zsh's tiny default. Backs off if the user set
+    # HISTFILE themselves — their choice wins.
+    if [[ -n "$__mterm_hist_file" && "$HISTFILE" == "$__mterm_hist_file" ]]; then
+        [[ -r "$__mterm_hist_shared" ]] && fc -R "$__mterm_hist_shared"
+        __mterm_hist_flush() {
+            [[ -n "$__mterm_hist_file" ]] || return
+            [[ -s "$__mterm_hist_file" ]] && cat "$__mterm_hist_file" >> "$__mterm_hist_shared"
+            rm -f "$__mterm_hist_file"
+        }
+        # Fires on `exit` and on the SIGHUP mTerm sends when a tab is closed.
+        zshexit_functions+=(__mterm_hist_flush)
+    fi
 
     # OSC 133 (FinalTerm) semantic prompt markers:
     #   precmd  → D (exit code of last command) + A (new prompt starting)
@@ -143,4 +225,5 @@ enum ShellIntegration {
     precmd_functions=(__mterm_precmd ${(@)precmd_functions:#__mterm_precmd})
     preexec_functions=(__mterm_preexec ${(@)preexec_functions:#__mterm_preexec})
     """#
+    }
 }
