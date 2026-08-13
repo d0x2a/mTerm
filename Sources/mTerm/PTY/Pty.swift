@@ -35,6 +35,11 @@ final class Pty {
     }
 
     static func spawnShell(cols: Int, rows: Int, cwd: String? = nil) -> Pty? {
+        // Re-assert the ZDOTDIR wrapper. It's written once at launch, but the
+        // app can outlive it, and a wrapper that goes missing takes the user's
+        // entire zsh config down with it (see ShellIntegration).
+        ShellIntegration.ensureInstalled()
+
         setenv("TERM", "xterm-256color", 1)
         setenv("LANG", "en_US.UTF-8", 1)
         setenv("COLORTERM", "truecolor", 1)
