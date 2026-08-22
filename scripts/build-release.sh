@@ -15,7 +15,7 @@ set -euo pipefail
 DEVELOPER_ID_APPLICATION="${DEVELOPER_ID_APPLICATION:-Developer ID Application: Dox2A Labs LLC (7JD669BMB4)}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-mterm-notary}"
 BUNDLE_ID="${BUNDLE_ID:-com.d0x2a.mTerm}"
-VERSION="${VERSION:-0.5.6}"
+VERSION="${VERSION:-0.5.7}"
 UNIVERSAL="${UNIVERSAL:-0}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
