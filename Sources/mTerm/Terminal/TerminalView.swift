@@ -73,6 +73,7 @@ final class TerminalView: NSView, CALayerDelegate {
     private var lastAppliedFontFamily: String = ThemeStore.shared.settings.fontFamily
     private var lastAppliedFontSize: Double = ThemeStore.shared.settings.fontSize
     private var lastAppliedStrokeWeight: Double = ThemeStore.shared.settings.strokeWeight
+    private var lastAppliedLineHeight: Double = ThemeStore.shared.settings.lineHeight
 
     override var wantsUpdateLayer: Bool { true }
     override var isFlipped: Bool { true }
@@ -107,10 +108,12 @@ final class TerminalView: NSView, CALayerDelegate {
         guard s.fontFamily != lastAppliedFontFamily
             || s.fontSize != lastAppliedFontSize
             || s.strokeWeight != lastAppliedStrokeWeight
+            || s.lineHeight != lastAppliedLineHeight
         else { return }
         lastAppliedFontFamily = s.fontFamily
         lastAppliedFontSize = s.fontSize
         lastAppliedStrokeWeight = s.strokeWeight
+        lastAppliedLineHeight = s.lineHeight
         rebuildRenderer()
     }
 
@@ -124,7 +127,8 @@ final class TerminalView: NSView, CALayerDelegate {
             scale: scale,
             fontFamily: lastAppliedFontFamily,
             fontSize: lastAppliedFontSize,
-            strokeWeight: lastAppliedStrokeWeight
+            strokeWeight: lastAppliedStrokeWeight,
+            lineHeight: lastAppliedLineHeight
         )
         resizeSessionIfNeeded()
     }
@@ -616,7 +620,8 @@ final class TerminalView: NSView, CALayerDelegate {
             scale: scale,
             fontFamily: s.fontFamily,
             fontSize: s.fontSize,
-            strokeWeight: s.strokeWeight
+            strokeWeight: s.strokeWeight,
+            lineHeight: s.lineHeight
         )
     }
 

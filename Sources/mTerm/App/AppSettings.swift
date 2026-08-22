@@ -24,6 +24,13 @@ struct AppSettings: Codable, Equatable {
     /// "too thin" on dark themes); 1.0 ≈ macOS's old CG font-smoothing dilation.
     /// 0.5 is the default — visibly bolder than 0 without overshooting iTerm.
     var strokeWeight: Double = 0.5
+    /// Row height as a multiple of the font's tight ascent+descent box.
+    /// 1.0 is the classic dense terminal packing (iTerm2 / Alacritty); 1.15 is
+    /// the default because that packing reads as cramped at typical sizes —
+    /// at 13pt it buys 5 device pixels per row, which roughly doubles the
+    /// whitespace between one row's ink and the next. Extra leading is split
+    /// above and below the text.
+    var lineHeight: Double = 1.15
     var warnOnCloseWithRunningProcess: Bool = true
 
     /// Master switch for macOS notifications. When off, bell and OSC 9/777
@@ -39,7 +46,7 @@ struct AppSettings: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case appearanceMode, lightThemeId, darkThemeId, fontFamily, fontSize,
-             strokeWeight, warnOnCloseWithRunningProcess,
+             strokeWeight, lineHeight, warnOnCloseWithRunningProcess,
              notificationsEnabled, notifyOnBell, notifyOnlyWhenUnfocused
         /// Read-only key for migrating old settings; we never write it back.
         case thinStrokes
@@ -53,6 +60,7 @@ struct AppSettings: Codable, Equatable {
         try c.encode(fontFamily, forKey: .fontFamily)
         try c.encode(fontSize, forKey: .fontSize)
         try c.encode(strokeWeight, forKey: .strokeWeight)
+        try c.encode(lineHeight, forKey: .lineHeight)
         try c.encode(warnOnCloseWithRunningProcess, forKey: .warnOnCloseWithRunningProcess)
         try c.encode(notificationsEnabled, forKey: .notificationsEnabled)
         try c.encode(notifyOnBell, forKey: .notifyOnBell)
@@ -77,6 +85,10 @@ struct AppSettings: Codable, Equatable {
         } else {
             self.strokeWeight = 0.5
         }
+        // Settings files written before line spacing existed have no key, so
+        // they adopt the new default rather than staying pinned to 1.0.
+        self.lineHeight =
+            try c.decodeIfPresent(Double.self, forKey: .lineHeight) ?? 1.15
         self.warnOnCloseWithRunningProcess =
             try c.decodeIfPresent(Bool.self, forKey: .warnOnCloseWithRunningProcess) ?? true
         self.notificationsEnabled =

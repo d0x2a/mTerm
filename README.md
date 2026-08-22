@@ -41,6 +41,7 @@ swift run -c release mTerm
 - macOS notifications for terminal attention events (bell, OSC 9 / OSC 777) — configurable in Settings.
 - Triggers engine with built-in regex rules for URLs (⌘-click to open), file paths (⌘-click to reveal), git SHAs, IPv4 addresses.
 - Close-confirmation when a foreground process is running (`vim`, `ssh`, etc.) — togglable in Settings.
+- Font family, size, stroke weight, and line spacing (1.0×–2.0×, default 1.15×) are all adjustable live in Settings.
 - Settings window organized into Appearance / General / Notifications panes.
 
 ## Not yet (tracked for v1)

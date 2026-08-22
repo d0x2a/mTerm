@@ -42,7 +42,14 @@ struct HighlightBand {
 struct GridLayout {
     let cellWidth: Float       // drawable pixels
     let cellHeight: Float
-    let ascent: Float
+    let ascent: Float          // baseline offset from the top of the cell
+    /// Height of the tight ascent+descent glyph box inside the cell. Equals
+    /// cellHeight at line height 1.0; smaller once extra leading is added, and
+    /// what row-relative decorations (underlines) anchor to so they stay
+    /// attached to the text instead of drifting to the bottom of a tall cell.
+    let glyphBoxHeight: Float
+    /// Blank pixels inserted above the glyph box (half of the extra leading).
+    let glyphBoxTop: Float
     let margin: Float          // minimum padding around the grid
     let scale: Float
 
@@ -87,7 +94,8 @@ final class Renderer {
     init(device: MTLDevice, pixelFormat: MTLPixelFormat, scale: CGFloat,
          fontFamily: String = FontCatalog.defaultFamily,
          fontSize: Double = 14,
-         strokeWeight: Double = 0.5) {
+         strokeWeight: Double = 0.5,
+         lineHeight: Double = 1.15) {
         self.device = device
         guard let queue = device.makeCommandQueue() else {
             fatalError("could not create Metal command queue")
@@ -102,12 +110,20 @@ final class Renderer {
         // pixel boundary (combined with integer cellHeight + integer grid
         // origin, this is what lets us use nearest sampling on the atlas).
         //
-        // Cell height intentionally excludes CTFontGetLeading. CoreText's
-        // "leading" is the recommended whitespace between lines for body
-        // text — it makes a terminal feel airy compared to iTerm2 / Alacritty.
+        // The natural cell height intentionally excludes CTFontGetLeading.
+        // CoreText's "leading" is the recommended whitespace between lines for
+        // body text — it makes a terminal feel airy compared to iTerm2 /
+        // Alacritty. Users who want that air back dial in `lineHeight`, which
+        // multiplies the tight ascent+descent box; the extra pixels are split
+        // above and below the glyph so rows stay optically centered.
         let ascent = Float(CTFontGetAscent(font)).rounded()
         let descent = Float(CTFontGetDescent(font))
-        let cellHeight = ceil(ascent + descent)
+        let naturalHeight = ceil(ascent + descent)
+        let cellHeight = ceil(naturalHeight * Float(max(1.0, lineHeight)))
+        // Floor the half so the baseline stays on an integer pixel; the odd
+        // leftover pixel lands below the glyph, where it's least noticeable.
+        let topPadding = ((cellHeight - naturalHeight) / 2).rounded(.down)
+        let baselineAscent = ascent + topPadding
 
         var charM: UniChar = 0x4D
         var glyphM: CGGlyph = 0
@@ -119,7 +135,9 @@ final class Renderer {
         self.layout = GridLayout(
             cellWidth: cellWidth,
             cellHeight: cellHeight,
-            ascent: ascent,
+            ascent: baselineAscent,
+            glyphBoxHeight: naturalHeight,
+            glyphBoxTop: topPadding,
             margin: 8 * Float(scale),
             scale: Float(scale)
         )
@@ -211,6 +229,10 @@ final class Renderer {
         // selection/cursor so those overlay on top.
         let underlineThickness = max(1, layout.scale)
         let underlineInset     = max(1, layout.scale)
+        // Anchored to the glyph box, not the cell, so extra line height pads
+        // the row without pushing underlines away from the characters.
+        let underlineTop = layout.glyphBoxTop + layout.glyphBoxHeight
+            - underlineInset - underlineThickness
         for h in highlights {
             let x = origin.x + Float(h.col) * cellWidth
             let y = origin.y + Float(h.row) * cellHeight
@@ -231,7 +253,7 @@ final class Renderer {
                 // the line stays visible even when the tint alpha is low.
                 let underlineColor = SIMD4<Float>(h.color.x, h.color.y, h.color.z, 1.0)
                 flats.append(FlatInstance(
-                    pos: SIMD2<Float>(x, y + cellHeight - underlineInset - underlineThickness),
+                    pos: SIMD2<Float>(x, y + underlineTop),
                     size: SIMD2<Float>(w, underlineThickness),
                     color: underlineColor
                 ))

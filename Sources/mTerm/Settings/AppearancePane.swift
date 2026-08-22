@@ -60,6 +60,16 @@ struct AppearancePane: View {
                     }
                     Slider(value: $store.settings.strokeWeight, in: 0.0...1.0)
                 }
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text("Line spacing")
+                        Spacer()
+                        Text(String(format: "%.2f×", store.settings.lineHeight))
+                            .foregroundColor(.secondary)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    Slider(value: $store.settings.lineHeight, in: 1.0...2.0, step: 0.05)
+                }
             }
 
             Section("Preview") {

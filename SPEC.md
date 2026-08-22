@@ -146,6 +146,7 @@ iTerm's profile model is the canonical example of too much. mTerm's model:
 ## Typography & Rendering
 
 - **Font:** SF Mono default. User-selectable monospace fonts via the font picker.
+- **Line spacing:** Adjustable 1.0×–2.0× of the font's ascent+descent box, default 1.15×. 1.0× is the classic dense terminal packing; extra leading is split above and below the text so rows stay optically centered.
 - **Ligatures:** On by default (controlled by an OpenType feature flag in prefs). Renders `==`, `=>`, `!=`, `->` etc. via CoreText shaping.
 - **Emoji & complex scripts:** CoreText handles shaping for emoji, CJK, combining marks, RTL. The glyph atlas keys on `(font, glyphID, size, subpixel-x-offset, color-or-not)`.
 - **Subpixel positioning:** Glyphs cached at 3 subpixel x-offsets for sharper text at non-integer cell origins.
