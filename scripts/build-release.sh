@@ -30,13 +30,25 @@ rm -rf "$BUILD"
 mkdir -p "$BUILD" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 echo "▶ building release binary"
+# The arch flags have to be on --show-bin-path too: a universal build lands in
+# .build/apple/Products/Release, and asking without them hands back the
+# host-arch path instead — which is how UNIVERSAL=1 used to ship arm64-only.
+BUILD_FLAGS=(-c release)
 if [[ "$UNIVERSAL" == "1" ]]; then
-    swift build -c release --arch arm64 --arch x86_64
-else
-    swift build -c release
+    BUILD_FLAGS+=(--arch arm64 --arch x86_64)
 fi
-BIN_DIR="$(swift build -c release --show-bin-path)"
+swift build "${BUILD_FLAGS[@]}"
+BIN_DIR="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)"
 cp "$BIN_DIR/mTerm" "$APP/Contents/MacOS/mTerm"
+
+if [[ "$UNIVERSAL" == "1" ]]; then
+    ARCHS="$(lipo -archs "$APP/Contents/MacOS/mTerm")"
+    [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]] || {
+        echo "✗ expected a universal binary, got: $ARCHS" >&2
+        exit 1
+    }
+    echo "  universal binary: $ARCHS"
+fi
 
 echo "▶ writing Info.plist (bundle=$BUNDLE_ID, version=$VERSION)"
 sed -e "s|__BUNDLE_ID__|$BUNDLE_ID|g" \
