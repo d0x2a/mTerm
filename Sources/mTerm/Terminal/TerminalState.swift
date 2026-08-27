@@ -299,8 +299,16 @@ final class TerminalState: ParserSink {
         switch final {
         case 0x41:                                  // 'A' CUU
             cursorRow = max(0, cursorRow - max(1, p0))
+            resolvePendingWrap()
         case 0x42:                                  // 'B' CUD
             cursorRow = min(rows - 1, cursorRow + max(1, p0))
+            resolvePendingWrap()
+        case 0x45:                                  // 'E' CNL — down n, col 0
+            cursorRow = min(rows - 1, cursorRow + max(1, p0))
+            cursorCol = 0
+        case 0x46:                                  // 'F' CPL — up n, col 0
+            cursorRow = max(0, cursorRow - max(1, p0))
+            cursorCol = 0
         case 0x43:                                  // 'C' CUF
             cursorCol = min(cols - 1, cursorCol + max(1, p0))
         case 0x44:                                  // 'D' CUB
@@ -314,6 +322,7 @@ final class TerminalState: ParserSink {
             cursorCol = min(cols - 1, c - 1)
         case 0x64:                                  // 'd' VPA — absolute row
             cursorRow = max(0, min(rows - 1, max(1, p0) - 1))
+            resolvePendingWrap()
         case 0x50:                                  // 'P' DCH — delete chars
             deleteChars(max(1, p0))
         case 0x4A:                                  // 'J' ED
@@ -686,6 +695,15 @@ final class TerminalState: ParserSink {
     }
 
     // MARK: scrolling / erase
+
+    /// After a glyph lands in the last column, cursorCol sits at `cols` — the
+    /// deferred-wrap state, so the wrap only happens if another glyph arrives.
+    /// Any cursor movement cancels it (xterm clears its last-column flag the
+    /// same way); without this a row-only move would leave the state armed and
+    /// the next glyph would wrap onto the row below the one just addressed.
+    private func resolvePendingWrap() {
+        cursorCol = min(cursorCol, cols - 1)
+    }
 
     private func advanceRow() {
         if cursorRow >= rows - 1 {
