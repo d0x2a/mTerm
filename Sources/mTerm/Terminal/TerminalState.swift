@@ -127,11 +127,34 @@ final class TerminalState: ParserSink {
     private var prompts: [Prompt] = []
     var promptAbsoluteLines: [Int] { prompts.map { $0.absoluteLine } }
 
+    // DECSTBM scrolling margins, 0-based and inclusive. Defaults to the whole
+    // screen; only rows between them scroll on a line feed.
+    private var scrollTop: Int = 0
+    private var scrollBottom: Int
+
+    // DEC 2026 synchronized output. While a frame is open the view keeps
+    // presenting the previous one so a multi-line redraw lands at once. The
+    // deadline is the safety valve: a child that sets the mode and then dies —
+    // or takes pathologically long between frames — must not freeze the view.
+    private var syncUpdateDeadline: CFAbsoluteTime?
+    private static let syncUpdateTimeout: CFAbsoluteTime = 0.25
+
     private(set) var cursorCol: Int = 0
     private(set) var cursorRow: Int = 0
     private(set) var cursorVisible: Bool = true
     private(set) var title: String = ""
     private(set) var currentDirectory: String? = nil
+
+    /// True while the child holds a synchronized update open (DEC 2026), until
+    /// the safety deadline passes.
+    var synchronizedUpdateActive: Bool {
+        guard let deadline = syncUpdateDeadline else { return false }
+        if CFAbsoluteTimeGetCurrent() >= deadline {
+            syncUpdateDeadline = nil
+            return false
+        }
+        return true
+    }
 
     /// Fired on the parser (session) queue when the child writes BEL (0x07).
     /// Session marshals this to the main thread.
@@ -162,6 +185,7 @@ final class TerminalState: ParserSink {
     init(cols: Int, rows: Int) {
         self.cols = max(1, cols)
         self.rows = max(1, rows)
+        self.scrollBottom = self.rows - 1
         let theme = ThemeStore.currentTheme
         self.currentFg = theme.foreground
         self.currentBg = theme.background
@@ -191,6 +215,9 @@ final class TerminalState: ParserSink {
         stashedCursor.row = min(stashedCursor.row, rows - 1)
         savedCursor.col = min(savedCursor.col, cols - 1)
         savedCursor.row = min(savedCursor.row, rows - 1)
+        // Margins don't survive a reflow; xterm drops them on resize too.
+        scrollTop = 0
+        scrollBottom = rows - 1
     }
 
     func snapshot() -> TerminalSnapshot {
@@ -298,16 +325,16 @@ final class TerminalState: ParserSink {
         let p0 = params.first ?? 0
         switch final {
         case 0x41:                                  // 'A' CUU
-            cursorRow = max(0, cursorRow - max(1, p0))
+            cursorRow = rowUp(from: cursorRow, by: max(1, p0))
             resolvePendingWrap()
         case 0x42:                                  // 'B' CUD
-            cursorRow = min(rows - 1, cursorRow + max(1, p0))
+            cursorRow = rowDown(from: cursorRow, by: max(1, p0))
             resolvePendingWrap()
         case 0x45:                                  // 'E' CNL — down n, col 0
-            cursorRow = min(rows - 1, cursorRow + max(1, p0))
+            cursorRow = rowDown(from: cursorRow, by: max(1, p0))
             cursorCol = 0
         case 0x46:                                  // 'F' CPL — up n, col 0
-            cursorRow = max(0, cursorRow - max(1, p0))
+            cursorRow = rowUp(from: cursorRow, by: max(1, p0))
             cursorCol = 0
         case 0x43:                                  // 'C' CUF
             cursorCol = min(cols - 1, cursorCol + max(1, p0))
@@ -325,6 +352,20 @@ final class TerminalState: ParserSink {
             resolvePendingWrap()
         case 0x50:                                  // 'P' DCH — delete chars
             deleteChars(max(1, p0))
+        case 0x40:                                  // '@' ICH — insert blanks
+            insertChars(max(1, p0))
+        case 0x58:                                  // 'X' ECH — erase in place
+            eraseChars(max(1, p0))
+        case 0x4C:                                  // 'L' IL — insert lines
+            insertLines(max(1, p0))
+        case 0x4D:                                  // 'M' DL — delete lines
+            deleteLines(max(1, p0))
+        case 0x53:                                  // 'S' SU — scroll region up
+            scrollUp(max(1, p0), top: scrollTop, bottom: scrollBottom)
+        case 0x54:                                  // 'T' SD — scroll region down
+            scrollDown(max(1, p0), top: scrollTop, bottom: scrollBottom)
+        case 0x72:                                  // 'r' DECSTBM — set margins
+            setScrollRegion(params)
         case 0x4A:                                  // 'J' ED
             eraseDisplay(mode: p0)
         case 0x4B:                                  // 'K' EL
@@ -602,6 +643,17 @@ final class TerminalState: ParserSink {
             saveCursor()
         case 0x38:                                  // '8' DECRC
             restoreCursor()
+        case 0x44:                                  // 'D' IND — index
+            advanceRow()
+        case 0x45:                                  // 'E' NEL — next line
+            cursorCol = 0
+            advanceRow()
+        case 0x4D:                                  // 'M' RI — reverse index
+            if cursorRow == scrollTop {
+                scrollDown(1, top: scrollTop, bottom: scrollBottom)
+            } else if cursorRow > 0 {
+                cursorRow -= 1
+            }
         case 0x63:                                  // 'c' RIS — full reset
             fullReset()
         default:
@@ -617,6 +669,10 @@ final class TerminalState: ParserSink {
             switch p {
             case 25:
                 cursorVisible = set
+            case 2026:                              // synchronized output
+                syncUpdateDeadline = set
+                    ? CFAbsoluteTimeGetCurrent() + Self.syncUpdateTimeout
+                    : nil
             case 47, 1047:
                 set ? enterAltScreen(clear: true) : exitAltScreen()
             case 1048:
@@ -668,6 +724,8 @@ final class TerminalState: ParserSink {
         currentFg = theme.foreground
         currentBg = theme.background
         currentAttrs = []
+        scrollTop = 0
+        scrollBottom = rows - 1
         usingAlt = true
     }
 
@@ -680,6 +738,8 @@ final class TerminalState: ParserSink {
         currentFg = stashedFg
         currentBg = stashedBg
         currentAttrs = stashedAttrs
+        scrollTop = 0
+        scrollBottom = rows - 1
         usingAlt = false
     }
 
@@ -692,6 +752,9 @@ final class TerminalState: ParserSink {
         currentBg = theme.background
         currentAttrs = []
         cursorVisible = true
+        scrollTop = 0
+        scrollBottom = rows - 1
+        syncUpdateDeadline = nil
     }
 
     // MARK: scrolling / erase
@@ -706,36 +769,103 @@ final class TerminalState: ParserSink {
     }
 
     private func advanceRow() {
-        if cursorRow >= rows - 1 {
-            scrollUp(1)
-        } else {
+        if cursorRow == scrollBottom {
+            scrollUp(1, top: scrollTop, bottom: scrollBottom)
+        } else if cursorRow < rows - 1 {
+            // Below the bottom margin the cursor just sits there: a line feed
+            // outside the region must not scroll the screen.
             cursorRow += 1
         }
     }
 
-    private func scrollUp(_ n: Int) {
-        let lines = min(n, rows)
-        if !usingAlt {
-            for r in 0..<lines {
-                let row = Array(cells[r * cols ..< (r + 1) * cols])
-                scrollback.append(row)
-            }
-            if scrollback.count > maxScrollback {
-                scrollback.removeFirst(scrollback.count - maxScrollback)
-            }
-            scrolledRows += lines
-            // Drop prompts that have fallen out of scrollback.
-            let topOfHistory = scrolledRows - scrollback.count
-            if let firstKeep = prompts.firstIndex(where: { $0.absoluteLine >= topOfHistory }),
-               firstKeep > 0 {
-                prompts.removeFirst(firstKeep)
-            } else if !prompts.isEmpty,
-                      prompts.last!.absoluteLine < topOfHistory {
-                prompts.removeAll()
+    /// CUU / CPL. A cursor already inside the region stops at the top margin;
+    /// one above it stops at row 0.
+    private func rowUp(from row: Int, by n: Int) -> Int {
+        max(row >= scrollTop ? scrollTop : 0, row - n)
+    }
+
+    /// CUD / CNL — the mirror of `rowUp` against the bottom margin.
+    private func rowDown(from row: Int, by n: Int) -> Int {
+        min(row <= scrollBottom ? scrollBottom : rows - 1, row + n)
+    }
+
+    /// Moves rows [top, bottom] up by `n`, blanking what opens up at the bottom
+    /// margin. Only a full-screen region on the primary screen feeds scrollback
+    /// — a narrower one discards what scrolls off, which is what xterm does —
+    /// and DL passes `toScrollback: false` since deleted lines aren't history.
+    private func scrollUp(_ n: Int, top: Int, bottom: Int, toScrollback: Bool = true) {
+        guard top >= 0, bottom < rows, top <= bottom else { return }
+        let lines = min(n, bottom - top + 1)
+        guard lines > 0 else { return }
+
+        if toScrollback && !usingAlt && top == 0 && bottom == rows - 1 {
+            pushToScrollback(lines)
+        }
+        let shiftEnd = bottom - lines
+        if shiftEnd >= top {
+            for r in top...shiftEnd {
+                let dst = r * cols, src = (r + lines) * cols
+                for c in 0..<cols { cells[dst + c] = cells[src + c] }
             }
         }
-        cells.removeFirst(lines * cols)
-        cells.append(contentsOf: Array(repeating: Cell(), count: lines * cols))
+        for r in (bottom - lines + 1)...bottom {
+            let base = r * cols
+            for c in 0..<cols { cells[base + c] = Cell() }
+        }
+    }
+
+    /// Moves rows [top, bottom] down by `n`, blanking what opens up at the top
+    /// margin. Nothing is ever saved: what falls off the bottom is gone.
+    private func scrollDown(_ n: Int, top: Int, bottom: Int) {
+        guard top >= 0, bottom < rows, top <= bottom else { return }
+        let lines = min(n, bottom - top + 1)
+        guard lines > 0 else { return }
+
+        let shiftStart = top + lines
+        if shiftStart <= bottom {
+            for r in stride(from: bottom, through: shiftStart, by: -1) {
+                let dst = r * cols, src = (r - lines) * cols
+                for c in 0..<cols { cells[dst + c] = cells[src + c] }
+            }
+        }
+        for r in top...(top + lines - 1) {
+            let base = r * cols
+            for c in 0..<cols { cells[base + c] = Cell() }
+        }
+    }
+
+    private func pushToScrollback(_ lines: Int) {
+        for r in 0..<lines {
+            let row = Array(cells[r * cols ..< (r + 1) * cols])
+            scrollback.append(row)
+        }
+        if scrollback.count > maxScrollback {
+            scrollback.removeFirst(scrollback.count - maxScrollback)
+        }
+        scrolledRows += lines
+        // Drop prompts that have fallen out of scrollback.
+        let topOfHistory = scrolledRows - scrollback.count
+        if let firstKeep = prompts.firstIndex(where: { $0.absoluteLine >= topOfHistory }),
+           firstKeep > 0 {
+            prompts.removeFirst(firstKeep)
+        } else if !prompts.isEmpty,
+                  prompts.last!.absoluteLine < topOfHistory {
+            prompts.removeAll()
+        }
+    }
+
+    /// DECSTBM. Margins arrive 1-based and inclusive; a region shorter than two
+    /// rows is ignored, per DEC. Setting margins homes the cursor.
+    private func setScrollRegion(_ params: [Int]) {
+        let requestedTop = params.count >= 1 && params[0] > 0 ? params[0] - 1 : 0
+        let requestedBottom = params.count >= 2 && params[1] > 0 ? params[1] - 1 : rows - 1
+        let top = max(0, min(rows - 1, requestedTop))
+        let bottom = max(0, min(rows - 1, requestedBottom))
+        guard top < bottom else { return }
+        scrollTop = top
+        scrollBottom = bottom
+        cursorRow = 0
+        cursorCol = 0
     }
 
     private func eraseDisplay(mode: Int) {
@@ -775,6 +905,42 @@ final class TerminalState: ParserSink {
         for c in (cols - n)..<cols {
             cells[base + c] = Cell()
         }
+    }
+
+    /// ICH: shifts the rest of the line right by `count`, dropping whatever
+    /// falls off the end, and blanks the gap left at the cursor.
+    private func insertChars(_ count: Int) {
+        let col = min(cursorCol, cols - 1)
+        let n = min(count, cols - col)
+        guard n > 0 else { return }
+        let base = cursorRow * cols
+        for c in stride(from: cols - 1, through: col + n, by: -1) {
+            cells[base + c] = cells[base + c - n]
+        }
+        for c in col..<(col + n) { cells[base + c] = Cell() }
+    }
+
+    /// ECH: blanks `count` cells from the cursor without shifting the line.
+    private func eraseChars(_ count: Int) {
+        let col = min(cursorCol, cols - 1)
+        let n = min(count, cols - col)
+        guard n > 0 else { return }
+        let base = cursorRow * cols
+        for c in col..<(col + n) { cells[base + c] = Cell() }
+    }
+
+    /// IL / DL. Both are no-ops outside the scrolling region, and both scroll
+    /// only from the cursor row down to the bottom margin.
+    private func insertLines(_ count: Int) {
+        guard cursorRow >= scrollTop, cursorRow <= scrollBottom else { return }
+        scrollDown(count, top: cursorRow, bottom: scrollBottom)
+        cursorCol = 0
+    }
+
+    private func deleteLines(_ count: Int) {
+        guard cursorRow >= scrollTop, cursorRow <= scrollBottom else { return }
+        scrollUp(count, top: cursorRow, bottom: scrollBottom, toScrollback: false)
+        cursorCol = 0
     }
 
     private func eraseLine(mode: Int) {

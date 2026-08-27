@@ -761,6 +761,11 @@ final class TerminalView: NSView, CALayerDelegate {
         ensureSession()
         reconcileThemeIfChanged()
         reconcileFontIfChanged()
+        // While the child holds a synchronized update open (DEC 2026), hold the
+        // last frame: apps that redraw several lines per frame — Homebrew's
+        // download list, say — would otherwise be sampled mid-redraw and tear.
+        // A resize still presents, since setFrameSize calls renderFrame direct.
+        if session?.isSynchronizedUpdateActive == true { return }
         renderFrame()
     }
 

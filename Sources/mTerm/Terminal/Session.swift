@@ -44,6 +44,12 @@ final class Session {
         queue.sync { state.viewportSnapshot(scrollOffset: scrollOffset) }
     }
 
+    /// True while the child holds a synchronized-update frame open (DEC 2026).
+    /// The view stops presenting new frames until it closes.
+    var isSynchronizedUpdateActive: Bool {
+        queue.sync { state.synchronizedUpdateActive }
+    }
+
     /// Whole-buffer text (scrollback + active grid) for "Copy All".
     func bufferText() -> String {
         queue.sync { state.bufferText() }
