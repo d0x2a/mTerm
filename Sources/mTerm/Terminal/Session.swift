@@ -44,6 +44,11 @@ final class Session {
         queue.sync { state.viewportSnapshot(scrollOffset: scrollOffset) }
     }
 
+    /// Whole-buffer text (scrollback + active grid) for "Copy All".
+    func bufferText() -> String {
+        queue.sync { state.bufferText() }
+    }
+
     var currentDirectory: String? {
         queue.sync { state.currentDirectory }
     }

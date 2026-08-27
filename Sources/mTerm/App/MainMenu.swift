@@ -50,7 +50,14 @@ enum MainMenu {
         let editMenuItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        let copyAll = editMenu.addItem(withTitle: "Copy All",
+                                       action: #selector(TerminalView.copyAll(_:)),
+                                       keyEquivalent: "c")
+        copyAll.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All",
+                         action: #selector(NSText.selectAll(_:)),
+                         keyEquivalent: "a")
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Find",
                          action: #selector(TerminalView.performFind(_:)),

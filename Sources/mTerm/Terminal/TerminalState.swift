@@ -472,6 +472,32 @@ final class TerminalState: ParserSink {
     /// Plain-substring or NSRegularExpression search across scrollback and the
     /// active grid. Returns matches in reading order (oldest first), each tagged
     /// with an absolute line number so it stays addressable as the grid scrolls.
+    /// The whole buffer as plain text: scrollback followed by the active grid,
+    /// one line per row with trailing blanks trimmed. Trailing empty lines (the
+    /// unused grid below the cursor) are dropped. Used by "Copy All".
+    func bufferText() -> String {
+        var lines: [String] = []
+        lines.reserveCapacity(scrollback.count + rows)
+        for row in scrollback {
+            lines.append(Self.rowText(row))
+        }
+        for r in 0..<rows {
+            lines.append(Self.rowText(Array(cells[r * cols ..< (r + 1) * cols])))
+        }
+        while let last = lines.last, last.isEmpty { lines.removeLast() }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func rowText(_ row: [Cell]) -> String {
+        var line = ""
+        line.reserveCapacity(row.count)
+        for cell in row {
+            line.unicodeScalars.append(cell.scalar)
+        }
+        while line.last == " " { line.removeLast() }
+        return line
+    }
+
     func search(query: String, regex useRegex: Bool, caseSensitive: Bool) -> [SearchMatch] {
         guard !query.isEmpty else { return [] }
 

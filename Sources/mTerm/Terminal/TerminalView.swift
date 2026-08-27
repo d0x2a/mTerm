@@ -403,6 +403,40 @@ final class TerminalView: NSView, CALayerDelegate {
         scrollOffset = max(0, min(next, lastScrollbackLines))
     }
 
+    // MARK: context menu
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        window?.makeFirstResponder(self)
+
+        let menu = NSMenu()
+        menu.autoenablesItems = true
+
+        func add(_ title: String,
+                 _ action: Selector,
+                 key: String = "",
+                 mods: NSEvent.ModifierFlags = [.command],
+                 target: AnyObject? = self) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = mods
+            item.target = target
+        }
+
+        add("Copy", #selector(copy(_:)), key: "c")
+        add("Copy All", #selector(copyAll(_:)), key: "c", mods: [.command, .shift])
+        add("Paste", #selector(paste(_:)), key: "v")
+        add("Select All", #selector(selectAll(_:)), key: "a")
+        menu.addItem(.separator())
+        add("Find…", #selector(performFind(_:)), key: "f")
+        menu.addItem(.separator())
+        // Tab commands live on AppDelegate — let the responder chain find them.
+        add("New Tab", #selector(AppDelegate.openNewTab(_:)), key: "t", target: nil)
+        add("Close Tab", #selector(AppDelegate.closeActiveTab(_:)), key: "w", target: nil)
+
+        return menu
+    }
+
+    // MARK: clipboard
+
     @objc func paste(_ sender: Any?) {
         guard let session,
               let str = NSPasteboard.general.string(forType: .string),
@@ -424,10 +458,51 @@ final class TerminalView: NSView, CALayerDelegate {
         pb.setString(text, forType: .string)
     }
 
+    /// Selects everything currently on screen. Selections live in viewport
+    /// coordinates, so this covers the visible grid only — the whole-buffer
+    /// equivalent is Copy All.
+    override func selectAll(_ sender: Any?) {
+        guard let session else { return }
+        let snapshot = session.snapshot(scrollOffset: scrollOffset)
+        guard snapshot.cols > 0, snapshot.rows > 0 else { return }
+
+        // Stop at the last cell that actually holds something. Running to the
+        // bottom-right corner instead would drag the empty rows under the
+        // prompt into the copied text as a run of trailing newlines.
+        func lastContentCol(_ row: Int) -> Int? {
+            let base = row * snapshot.cols
+            for c in stride(from: snapshot.cols - 1, through: 0, by: -1) {
+                if !snapshot.cells[base + c].isBlank { return c }
+            }
+            return nil
+        }
+        for row in stride(from: snapshot.rows - 1, through: 0, by: -1) {
+            guard let col = lastContentCol(row) else { continue }
+            activeSelection = ActiveSelection(anchor: (col: 0, row: 0),
+                                              end: (col: col, row: row),
+                                              dragging: false)
+            return
+        }
+        activeSelection = nil          // nothing on screen to select
+    }
+
+    /// Copies the whole buffer — scrollback plus the visible grid — regardless
+    /// of what's selected.
+    @objc func copyAll(_ sender: Any?) {
+        guard let session else { return }
+        let text = session.bufferText()
+        guard !text.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
+
     @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(copy(_:)):
             return activeSelection != nil
+        case #selector(copyAll(_:)), #selector(selectAll(_:)):
+            return session != nil
         case #selector(paste(_:)):
             return NSPasteboard.general.canReadObject(forClasses: [NSString.self], options: nil)
         case #selector(jumpToPreviousPrompt(_:)),
@@ -543,6 +618,12 @@ final class TerminalView: NSView, CALayerDelegate {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let opt = mods.contains(.option)
         let shift = mods.contains(.shift)
+
+        // ⌘-anything is an app shortcut, never terminal input. When the matching
+        // menu item is disabled (⌘C with no selection, say), AppKit stops
+        // handling the key equivalent and the event falls through to keyDown —
+        // without this the bare letter would be typed into the shell.
+        if mods.contains(.command) { return [] }
 
         switch event.keyCode {
         case 36, 76:                                // Return / numpad enter
