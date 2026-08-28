@@ -15,19 +15,30 @@ struct Cell {
     var fg: SIMD4<Float>
     var bg: SIMD4<Float>
     var attrs: CellAttrs
+    /// Columns this cell occupies: 1 for an ordinary glyph, 2 for the leading
+    /// half of a double-width one, and 0 for the trailing half it reserves.
+    /// Kept a plain byte so Cell stays trivially copyable — the grid is copied
+    /// wholesale on every snapshot.
+    var width: UInt8
 
     init(scalar: Unicode.Scalar = " ",
          fg: SIMD4<Float>? = nil,
          bg: SIMD4<Float>? = nil,
-         attrs: CellAttrs = []) {
+         attrs: CellAttrs = [],
+         width: UInt8 = 1) {
         let theme = ThemeStore.currentTheme
         self.scalar = scalar
         self.fg = fg ?? theme.foreground
         self.bg = bg ?? theme.background
         self.attrs = attrs
+        self.width = width
     }
 
     var isBlank: Bool { scalar == " " && attrs.isEmpty }
+
+    /// The reserved trailing half of a double-width glyph. It carries no text
+    /// of its own, so copy and search skip it.
+    var isContinuation: Bool { width == 0 }
 }
 
 struct TerminalSnapshot {
@@ -86,7 +97,9 @@ struct Selection {
             let lastCol  = (r == endRow)   ? endCol   : snapshot.cols - 1
             var line = ""
             for c in firstCol...lastCol {
-                line.unicodeScalars.append(snapshot.cells[r * snapshot.cols + c].scalar)
+                let cell = snapshot.cells[r * snapshot.cols + c]
+                if cell.isContinuation { continue }
+                line.unicodeScalars.append(cell.scalar)
             }
             // Strip trailing spaces from each row except the last (so single-line
             // selections preserve trailing spaces if you actually selected them).
@@ -97,6 +110,22 @@ struct Selection {
         }
         return lines.joined(separator: "\n")
     }
+}
+
+/// What the child asked us to report. Each mode is a superset of the one above
+/// it, so the view can compare with `>=`-style checks on the case list.
+enum MouseTracking {
+    case off
+    case x10            // ?9    — press only
+    case normal         // ?1000 — press and release
+    case buttonEvent    // ?1002 — plus drags while a button is down
+    case anyEvent       // ?1003 — plus bare motion
+}
+
+/// How a mouse report is framed on the wire.
+enum MouseEncoding {
+    case x10            // legacy: bytes offset by 32, so columns stop at 223
+    case sgr            // ?1006: CSI < b ; x ; y M|m — no column limit
 }
 
 final class TerminalState: ParserSink {
@@ -126,6 +155,32 @@ final class TerminalState: ParserSink {
     }
     private var prompts: [Prompt] = []
     var promptAbsoluteLines: [Int] { prompts.map { $0.absoluteLine } }
+
+    // Modes the child toggles that change how text lands on the grid.
+    private var autoWrap: Bool = true               // DECAWM (?7)
+    private var originMode: Bool = false            // DECOM (?6)
+
+    // Modes the *view* has to honor. Read through Session on the main thread.
+    private(set) var bracketedPaste: Bool = false   // ?2004
+    private(set) var reportFocus: Bool = false      // ?1004
+    private(set) var mouseTracking: MouseTracking = .off
+    private(set) var mouseEncoding: MouseEncoding = .x10
+
+    // Tab stops as a set of columns; every 8 by default, but HTS/TBC let the
+    // child place its own.
+    private var tabStops: Set<Int> = []
+
+    // G0/G1 charset designations (the byte from `ESC ( c` / `ESC ) c`) and
+    // which one SI/SO has shifted in.
+    private var charsets: [UInt8] = [0x42, 0x42]    // 'B' — ASCII
+    private var activeCharset: Int = 0
+
+    /// Last glyph actually placed, for REP.
+    private var lastPrinted: Unicode.Scalar? = nil
+
+    /// Writes bytes back to the child — device attribute and cursor position
+    /// answers. Session points this at the PTY.
+    var onReply: (([UInt8]) -> Void)?
 
     // DECSTBM scrolling margins, 0-based and inclusive. Defaults to the whole
     // screen; only rows between them scroll on a line feed.
@@ -194,6 +249,7 @@ final class TerminalState: ParserSink {
         self.stashedFg = theme.foreground
         self.stashedBg = theme.background
         self.cells = Array(repeating: Cell(), count: self.cols * self.rows)
+        self.tabStops = Self.defaultTabStops(cols: self.cols)
     }
 
     func resize(cols requestedCols: Int, rows requestedRows: Int) {
@@ -215,9 +271,11 @@ final class TerminalState: ParserSink {
         stashedCursor.row = min(stashedCursor.row, rows - 1)
         savedCursor.col = min(savedCursor.col, cols - 1)
         savedCursor.row = min(savedCursor.row, rows - 1)
-        // Margins don't survive a reflow; xterm drops them on resize too.
+        // Margins and tab stops don't survive a reflow; xterm drops them on
+        // resize too.
         scrollTop = 0
         scrollBottom = rows - 1
+        tabStops = Self.defaultTabStops(cols: cols)
     }
 
     func snapshot() -> TerminalSnapshot {
@@ -284,43 +342,179 @@ final class TerminalState: ParserSink {
     // MARK: ParserSink
 
     func parserPrint(_ scalar: Unicode.Scalar) {
+        let glyph = translate(scalar)
+        putGlyph(glyph)
+        lastPrinted = glyph
+    }
+
+    /// Applies the active G0/G1 designation. Only DEC special graphics ('0')
+    /// remaps anything — that's what gives ncurses apps their box drawing when
+    /// they don't emit the Unicode characters directly.
+    private func translate(_ scalar: Unicode.Scalar) -> Unicode.Scalar {
+        guard charsets[activeCharset] == 0x30,      // '0'
+              scalar.value >= 0x5F, scalar.value <= 0x7E
+        else { return scalar }
+        return Self.decSpecialGraphics[Int(scalar.value - 0x5F)]
+    }
+
+    private func putGlyph(_ scalar: Unicode.Scalar) {
+        let width = Self.displayWidth(scalar)
+        if width == 0 {
+            attachMark(scalar)
+            return
+        }
         if cursorCol >= cols {
+            if autoWrap {
+                cursorCol = 0
+                advanceRow()
+            } else {
+                // DECAWM off: the last column just keeps getting overwritten.
+                cursorCol = cols - 1
+            }
+        }
+        // A double-width glyph never straddles the right edge — it moves to the
+        // next row whole, leaving the last column blank.
+        if width == 2 && cursorCol == cols - 1 {
+            guard autoWrap else { return }
+            cells[cursorRow * cols + cursorCol] = Cell()
             cursorCol = 0
             advanceRow()
         }
-        let idx = cursorRow * cols + cursorCol
+
+        // Both halves have to be cleaned up before anything is written, or the
+        // second cleanup would blank the head we just placed.
+        clearOrphan(at: cursorCol)
+        if width == 2 { clearOrphan(at: cursorCol + 1) }
+
         let inv = currentAttrs.contains(.inverse)
-        cells[idx] = Cell(
+        let cell = Cell(
             scalar: scalar,
             fg: inv ? currentBg : currentFg,
             bg: inv ? currentFg : currentBg,
-            attrs: currentAttrs
+            attrs: currentAttrs,
+            width: UInt8(width)
         )
-        cursorCol += 1
+        cells[cursorRow * cols + cursorCol] = cell
+        if width == 2 {
+            // The trailing half keeps the head's colors so selection and
+            // inverse video paint across the whole glyph.
+            var tail = cell
+            tail.scalar = " "
+            tail.width = 0
+            cells[cursorRow * cols + cursorCol + 1] = tail
+        }
+        cursorCol += width
     }
+
+    /// Overwriting half of a double-width pair strands the other half. Blank it
+    /// so no fragment of the old glyph is left behind.
+    private func clearOrphan(at col: Int) {
+        guard col >= 0, col < cols else { return }
+        let idx = cursorRow * cols + col
+        switch cells[idx].width {
+        case 0:                                     // trailing half: head is left
+            if col > 0 { cells[idx - 1] = Cell() }
+        case 2:                                     // leading half: tail is right
+            if col + 1 < cols { cells[idx + 1] = Cell() }
+        default:
+            break
+        }
+    }
+
+    /// Combining marks don't get a cell of their own — that would shift the row
+    /// out of step with what the child thinks it wrote. Compose the mark into
+    /// the glyph it follows when Unicode has a precomposed form (e + ´ → é),
+    /// and drop it when it doesn't.
+    private func attachMark(_ mark: Unicode.Scalar) {
+        var col = min(cursorCol, cols) - 1
+        guard col >= 0 else { return }
+        if cells[cursorRow * cols + col].isContinuation, col > 0 { col -= 1 }
+        let idx = cursorRow * cols + col
+        let composed = (String(cells[idx].scalar) + String(mark))
+            .precomposedStringWithCanonicalMapping
+            .unicodeScalars
+        if composed.count == 1, let single = composed.first {
+            cells[idx].scalar = single
+        }
+    }
+
+    /// UAX #11 display width. Zero for marks that hang off the previous glyph,
+    /// two for East Asian Wide/Fullwidth characters and emoji, one otherwise.
+    static func displayWidth(_ scalar: Unicode.Scalar) -> Int {
+        // Everything below the combining diacriticals is plain single-width
+        // text, which is the overwhelming majority of what a terminal prints —
+        // worth skipping the Unicode property lookups for.
+        if scalar.value < 0x0300 { return 1 }
+
+        switch scalar.properties.generalCategory {
+        // Spacing marks (Mc) are deliberately absent: they take a column of
+        // their own, unlike the marks that hang off the previous glyph.
+        case .nonspacingMark, .enclosingMark, .format:
+            // Zero-width joiners, variation selectors, combining accents.
+            return scalar.value == 0x00AD ? 1 : 0   // soft hyphen does print
+        default:
+            break
+        }
+        if scalar.properties.isEmojiPresentation { return 2 }
+        for range in Self.wideRanges where range.contains(scalar.value) { return 2 }
+        return 1
+    }
+
+    /// East Asian Wide and Fullwidth blocks. Emoji are caught by the property
+    /// check above, so this only has to cover the CJK/Hangul side.
+    private static let wideRanges: [ClosedRange<UInt32>] = [
+        0x1100...0x115F,        // Hangul Jamo
+        0x2E80...0x303E,        // CJK radicals, Kangxi, punctuation
+        0x3041...0x33FF,        // kana, Hangul compat, CJK squared forms
+        0x3400...0x4DBF,        // CJK ext A
+        0x4E00...0x9FFF,        // CJK unified
+        0xA000...0xA4CF,        // Yi
+        0xA960...0xA97F,        // Hangul Jamo ext A
+        0xAC00...0xD7A3,        // Hangul syllables
+        0xF900...0xFAFF,        // CJK compatibility ideographs
+        0xFE10...0xFE19,        // vertical forms
+        0xFE30...0xFE6F,        // CJK compatibility forms
+        0xFF00...0xFF60,        // fullwidth ASCII
+        0xFFE0...0xFFE6,        // fullwidth signs
+        0x1F300...0x1F64F,      // pictographs and emoticons
+        0x1F900...0x1F9FF,      // supplemental pictographs
+        0x20000...0x2FFFD,      // CJK ext B+
+        0x30000...0x3FFFD,      // CJK ext G+
+    ]
 
     func parserExecute(_ control: UInt8) {
         switch control {
         case 0x07: onBell?()                         // BEL
         case 0x08:                                  // BS
             if cursorCol > 0 { cursorCol -= 1 }
-        case 0x09:                                  // HT — next 8-col tab stop
-            let next = ((cursorCol / 8) + 1) * 8
-            cursorCol = min(cols - 1, next)
+        case 0x09:                                  // HT — next tab stop
+            cursorCol = nextTabStop(after: cursorCol)
         case 0x0A, 0x0B, 0x0C:                      // LF/VT/FF
             advanceRow()
         case 0x0D:                                  // CR
             cursorCol = 0
+        case 0x0E:                                  // SO — shift G1 in
+            activeCharset = 1
+        case 0x0F:                                  // SI — shift G0 in
+            activeCharset = 0
         default:
             break
         }
     }
 
-    func parserCSI(_ params: [Int], isPrivate: Bool, intermediates: [UInt8], final: UInt8) {
+    func parserCSI(_ params: [Int], marker: UInt8?, intermediates: [UInt8], final: UInt8) {
         if !intermediates.isEmpty { return }
-        if isPrivate {
+        switch marker {
+        case 0x3F:                                  // '?' DEC private modes
             handlePrivateCSI(params: params, final: final)
             return
+        case 0x3E:                                  // '>' secondary attributes
+            if final == 0x63 { reply("\u{1B}[>0;10;1c") }
+            return
+        case .some:                                 // '<' / '=' — nothing we do
+            return
+        case nil:
+            break
         }
         let p0 = params.first ?? 0
         switch final {
@@ -345,11 +539,35 @@ final class TerminalState: ParserSink {
         case 0x48, 0x66:                            // 'H' / 'f' CUP
             let r = params.count >= 1 ? max(1, params[0]) : 1
             let c = params.count >= 2 ? max(1, params[1]) : 1
-            cursorRow = min(rows - 1, r - 1)
+            cursorRow = absoluteRow(for: r)
             cursorCol = min(cols - 1, c - 1)
         case 0x64:                                  // 'd' VPA — absolute row
-            cursorRow = max(0, min(rows - 1, max(1, p0) - 1))
+            cursorRow = absoluteRow(for: max(1, p0))
             resolvePendingWrap()
+        case 0x49:                                  // 'I' CHT — forward tabs
+            for _ in 0..<max(1, p0) { cursorCol = nextTabStop(after: cursorCol) }
+        case 0x5A:                                  // 'Z' CBT — backward tabs
+            for _ in 0..<max(1, p0) { cursorCol = previousTabStop(before: cursorCol) }
+        case 0x62:                                  // 'b' REP — repeat last glyph
+            if let last = lastPrinted {
+                for _ in 0..<max(1, p0) { putGlyph(last) }
+            }
+        case 0x67:                                  // 'g' TBC — clear tab stops
+            if p0 == 3 { tabStops.removeAll() } else { tabStops.remove(cursorCol) }
+        case 0x63:                                  // 'c' DA1 — device attributes
+            // VT220 with ANSI color, which is what xterm-256color implies.
+            reply("\u{1B}[?62;22c")
+        case 0x6E:                                  // 'n' DSR — device status
+            switch p0 {
+            case 5:
+                reply("\u{1B}[0n")                   // "terminal OK"
+            case 6:                                 // cursor position report
+                let row = (originMode ? cursorRow - scrollTop : cursorRow) + 1
+                let col = min(cursorCol, cols - 1) + 1
+                reply("\u{1B}[\(row);\(col)R")
+            default:
+                break
+            }
         case 0x50:                                  // 'P' DCH — delete chars
             deleteChars(max(1, p0))
         case 0x40:                                  // '@' ICH — insert blanks
@@ -541,7 +759,7 @@ final class TerminalState: ParserSink {
     private static func rowText(_ row: [Cell]) -> String {
         var line = ""
         line.reserveCapacity(row.count)
-        for cell in row {
+        for cell in row where !cell.isContinuation {
             line.unicodeScalars.append(cell.scalar)
         }
         while line.last == " " { line.removeLast() }
@@ -584,17 +802,28 @@ final class TerminalState: ParserSink {
                          pattern: NSRegularExpression?,
                          caseSensitive: Bool,
                          into matches: inout [SearchMatch]) {
-        // Build a String where each cell scalar maps to exactly one UTF-16
-        // code unit. Since our parser only stores BMP scalars (>0xFFFF are
-        // skipped), this means string offsets == cell columns.
+        // String offsets can't double as column numbers any more: a double-width
+        // glyph covers two columns, its trailing half contributes no text at
+        // all, and an astral scalar is two UTF-16 units. Build the text and a
+        // parallel map from each UTF-16 offset back to the column it came from.
         var line = ""
+        var columnAt: [Int] = []
         line.reserveCapacity(row.count)
-        for cell in row {
-            if cell.scalar.value <= 0xFFFF {
-                line.unicodeScalars.append(cell.scalar)
-            } else {
-                line.unicodeScalars.append(" ")
-            }
+        columnAt.reserveCapacity(row.count)
+        for (col, cell) in row.enumerated() where !cell.isContinuation {
+            line.unicodeScalars.append(cell.scalar)
+            for _ in 0..<UTF16.width(cell.scalar) { columnAt.append(col) }
+        }
+
+        /// Turns a UTF-16 range in `line` back into grid columns; endCol is
+        /// exclusive, so a match ending on a wide glyph covers both its halves.
+        func columns(for range: NSRange) -> (start: Int, end: Int)? {
+            guard range.location < columnAt.count,
+                  range.location + range.length - 1 < columnAt.count
+            else { return nil }
+            let startCol = columnAt[range.location]
+            let lastCol = columnAt[range.location + range.length - 1]
+            return (startCol, lastCol + max(1, Int(row[lastCol].width)))
         }
         let ns = line as NSString
         let full = NSRange(location: 0, length: ns.length)
@@ -602,9 +831,9 @@ final class TerminalState: ParserSink {
         if let pattern = pattern {
             for m in pattern.matches(in: line, range: full) {
                 if m.range.location == NSNotFound || m.range.length == 0 { continue }
+                guard let c = columns(for: m.range) else { continue }
                 matches.append(SearchMatch(absoluteLine: absLine,
-                                           startCol: m.range.location,
-                                           endCol: m.range.location + m.range.length))
+                                           startCol: c.start, endCol: c.end))
             }
         } else {
             let options: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
@@ -613,9 +842,10 @@ final class TerminalState: ParserSink {
                 let searchRange = NSRange(location: pos, length: ns.length - pos)
                 let r = ns.range(of: query, options: options, range: searchRange)
                 if r.location == NSNotFound || r.length == 0 { break }
-                matches.append(SearchMatch(absoluteLine: absLine,
-                                           startCol: r.location,
-                                           endCol: r.location + r.length))
+                if let c = columns(for: r) {
+                    matches.append(SearchMatch(absoluteLine: absLine,
+                                               startCol: c.start, endCol: c.end))
+                }
                 pos = r.location + r.length
             }
         }
@@ -637,8 +867,19 @@ final class TerminalState: ParserSink {
     }
 
     func parserESC(_ final: UInt8, intermediates: [UInt8]) {
+        // `ESC ( c` / `ESC ) c` designate the G0 / G1 charset slots.
+        if intermediates.count == 1 {
+            switch intermediates[0] {
+            case 0x28: charsets[0] = final
+            case 0x29: charsets[1] = final
+            default: break
+            }
+            return
+        }
         if !intermediates.isEmpty { return }
         switch final {
+        case 0x48:                                  // 'H' HTS — set a tab stop
+            tabStops.insert(min(cursorCol, cols - 1))
         case 0x37:                                  // '7' DECSC
             saveCursor()
         case 0x38:                                  // '8' DECRC
@@ -667,8 +908,28 @@ final class TerminalState: ParserSink {
         let set = (final == 0x68)                   // 'h' = set, 'l' = reset
         for p in params.isEmpty ? [0] : params {
             switch p {
+            case 6:                                 // DECOM — origin mode
+                originMode = set
+                cursorRow = set ? scrollTop : 0
+                cursorCol = 0
+            case 7:                                 // DECAWM — autowrap
+                autoWrap = set
+            case 9:
+                setMouseTracking(.x10, on: set)
             case 25:
                 cursorVisible = set
+            case 1000:
+                setMouseTracking(.normal, on: set)
+            case 1002:
+                setMouseTracking(.buttonEvent, on: set)
+            case 1003:
+                setMouseTracking(.anyEvent, on: set)
+            case 1004:
+                reportFocus = set
+            case 1006:
+                mouseEncoding = set ? .sgr : .x10
+            case 2004:
+                bracketedPaste = set
             case 2026:                              // synchronized output
                 syncUpdateDeadline = set
                     ? CFAbsoluteTimeGetCurrent() + Self.syncUpdateTimeout
@@ -755,6 +1016,16 @@ final class TerminalState: ParserSink {
         scrollTop = 0
         scrollBottom = rows - 1
         syncUpdateDeadline = nil
+        autoWrap = true
+        originMode = false
+        bracketedPaste = false
+        reportFocus = false
+        mouseTracking = .off
+        mouseEncoding = .x10
+        charsets = [0x42, 0x42]
+        activeCharset = 0
+        tabStops = Self.defaultTabStops(cols: cols)
+        lastPrinted = nil
     }
 
     // MARK: scrolling / erase
@@ -777,6 +1048,66 @@ final class TerminalState: ParserSink {
             cursorRow += 1
         }
     }
+
+    private func reply(_ s: String) {
+        onReply?(Array(s.utf8))
+    }
+
+    /// A mode is only cleared by the same mode that set it, so an app resetting
+    /// ?1000 can't silently cancel the ?1002 tracking another one turned on.
+    private func setMouseTracking(_ mode: MouseTracking, on: Bool) {
+        if on {
+            mouseTracking = mode
+        } else if mouseTracking == mode {
+            mouseTracking = .off
+        }
+    }
+
+    /// Resolves a 1-based row from CUP/VPA. Under origin mode rows are counted
+    /// from the top margin and can't escape the scrolling region.
+    private func absoluteRow(for oneBased: Int) -> Int {
+        if originMode {
+            return min(scrollBottom, scrollTop + oneBased - 1)
+        }
+        return max(0, min(rows - 1, oneBased - 1))
+    }
+
+    private static func defaultTabStops(cols: Int) -> Set<Int> {
+        var stops = Set<Int>()
+        var c = 8
+        while c < cols {
+            stops.insert(c)
+            c += 8
+        }
+        return stops
+    }
+
+    private func nextTabStop(after col: Int) -> Int {
+        var best: Int?
+        for stop in tabStops where stop > col {
+            if best == nil || stop < best! { best = stop }
+        }
+        return min(cols - 1, best ?? cols - 1)
+    }
+
+    private func previousTabStop(before col: Int) -> Int {
+        var best: Int?
+        for stop in tabStops where stop < col {
+            if best == nil || stop > best! { best = stop }
+        }
+        return max(0, best ?? 0)
+    }
+
+    /// DEC special graphics, covering 0x5F...0x7E. Everything else in the set
+    /// is plain ASCII, so the table only needs this window.
+    private static let decSpecialGraphics: [Unicode.Scalar] = [
+        " ", "\u{25C6}", "\u{2592}", "\u{2409}", "\u{240C}", "\u{240D}", "\u{240A}",
+        "\u{00B0}", "\u{00B1}", "\u{2424}", "\u{240B}", "\u{2518}", "\u{2510}",
+        "\u{250C}", "\u{2514}", "\u{253C}", "\u{23BA}", "\u{23BB}", "\u{2500}",
+        "\u{23BC}", "\u{23BD}", "\u{251C}", "\u{2524}", "\u{2534}", "\u{252C}",
+        "\u{2502}", "\u{2264}", "\u{2265}", "\u{03C0}", "\u{2260}", "\u{00A3}",
+        "\u{00B7}",
+    ]
 
     /// CUU / CPL. A cursor already inside the region stops at the top margin;
     /// one above it stops at row 0.

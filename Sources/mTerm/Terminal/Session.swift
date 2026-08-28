@@ -33,6 +33,12 @@ final class Session {
         state.onNotify = { [weak self] title, body in
             DispatchQueue.main.async { self?.onNotify?(title, body) }
         }
+        // Device-attribute and cursor-position answers go straight back to the
+        // child. Already on the session queue, and the PTY write is a plain
+        // fd write, so there's no hop to make.
+        state.onReply = { [weak pty] bytes in
+            pty?.write(bytes)
+        }
         startReadLoop()
     }
 
@@ -42,6 +48,24 @@ final class Session {
 
     func snapshot(scrollOffset: Int = 0) -> TerminalSnapshot {
         queue.sync { state.viewportSnapshot(scrollOffset: scrollOffset) }
+    }
+
+    /// The modes the view has to honor, fetched in one hop so a mouse event
+    /// doesn't take four trips onto the session queue.
+    struct InputModes {
+        let bracketedPaste: Bool
+        let reportFocus: Bool
+        let mouseTracking: MouseTracking
+        let mouseEncoding: MouseEncoding
+    }
+
+    var inputModes: InputModes {
+        queue.sync {
+            InputModes(bracketedPaste: state.bracketedPaste,
+                       reportFocus: state.reportFocus,
+                       mouseTracking: state.mouseTracking,
+                       mouseEncoding: state.mouseEncoding)
+        }
     }
 
     /// True while the child holds a synchronized-update frame open (DEC 2026).

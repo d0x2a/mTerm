@@ -289,7 +289,9 @@ final class Renderer {
                 }
                 // Otherwise: unfocused window or "off" half of the blink → no cursor.
 
-                // Glyph: skip blank cells.
+                // Glyph: skip blank cells, and the trailing half of a
+                // double-width glyph — its head already drew across both cells.
+                if cell.isContinuation { continue }
                 if cell.scalar == " " { continue }
                 if cell.scalar.value > UInt32(UInt16.max) { continue }
                 guard let entry = glyphAtlas.entry(for: cell.scalar),

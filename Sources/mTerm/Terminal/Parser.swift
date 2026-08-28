@@ -3,7 +3,7 @@ import Foundation
 protocol ParserSink: AnyObject {
     func parserPrint(_ scalar: Unicode.Scalar)
     func parserExecute(_ control: UInt8)
-    func parserCSI(_ params: [Int], isPrivate: Bool, intermediates: [UInt8], final: UInt8)
+    func parserCSI(_ params: [Int], marker: UInt8?, intermediates: [UInt8], final: UInt8)
     func parserOSC(_ data: [UInt8])
     func parserESC(_ final: UInt8, intermediates: [UInt8])
 }
@@ -23,7 +23,11 @@ final class Parser {
     private var state: State = .ground
     private var params: [Int] = []
     private var currentParam: Int? = nil
-    private var isPrivate: Bool = false
+    /// The private-parameter marker byte ('?', '>', '<', '='), when the
+    /// sequence carried one. They don't mean the same thing — '?' introduces
+    /// DEC private modes, '>' the secondary device attributes — so collapsing
+    /// them into a single flag loses the distinction.
+    private var marker: UInt8? = nil
     private var intermediates: [UInt8] = []
     private var oscBuffer: [UInt8] = []
 
@@ -42,7 +46,7 @@ final class Parser {
             state = .escape
             params.removeAll(keepingCapacity: true)
             currentParam = nil
-            isPrivate = false
+            marker = nil
             intermediates.removeAll(keepingCapacity: true)
             return
         }
@@ -113,7 +117,7 @@ final class Parser {
     private func csiEntryByte(_ b: UInt8) {
         switch b {
         case 0x3C...0x3F:                 // '<' '=' '>' '?'
-            isPrivate = true
+            marker = b
             state = .csiParam
         case 0x30...0x39:                 // digit
             currentParam = Int(b - 0x30)
@@ -162,7 +166,7 @@ final class Parser {
     private func dispatchCSI(final: UInt8) {
         if let p = currentParam { params.append(p) }
         currentParam = nil
-        sink?.parserCSI(params, isPrivate: isPrivate, intermediates: intermediates, final: final)
+        sink?.parserCSI(params, marker: marker, intermediates: intermediates, final: final)
     }
 
     private func oscByte(_ b: UInt8) {
@@ -179,7 +183,7 @@ final class Parser {
             state = .escape
             params.removeAll(keepingCapacity: true)
             currentParam = nil
-            isPrivate = false
+            marker = nil
             intermediates.removeAll(keepingCapacity: true)
             return
         }

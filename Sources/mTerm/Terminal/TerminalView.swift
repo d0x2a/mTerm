@@ -32,6 +32,7 @@ final class TerminalView: NSView, CALayerDelegate {
     private var lastReportedTitle: String = ""
     private var lastReportedCwd: String? = nil
     private var lastReportedFgProcess: String? = nil
+    private var lastReportedFocus: Bool = false
     private var lastInputTime: CFTimeInterval = CACurrentMediaTime()
 
     private struct ActiveSelection {
@@ -193,6 +194,61 @@ final class TerminalView: NSView, CALayerDelegate {
         }
     }
 
+    /// Forwards a mouse event to the child when it has asked for tracking.
+    /// Returns true when the child took the event, so local selection stays out
+    /// of the way. Holding shift is the standard escape hatch back to
+    /// selecting, and scrolled-back views never report — the coordinates would
+    /// describe rows the child doesn't believe are on screen.
+    private func sendMouse(_ event: NSEvent,
+                           button: Int,
+                           kind: MouseReport.Kind,
+                           coord: (col: Int, row: Int)) -> Bool {
+        guard let session, scrollOffset == 0 else { return false }
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !mods.contains(.shift) else { return false }
+        let modes = session.inputModes
+        guard modes.mouseTracking != .off else { return false }
+
+        // Everything past this point belongs to the child even when the mode
+        // doesn't want this particular event — otherwise a drag the app isn't
+        // listening for would start painting a selection underneath it.
+        if let bytes = MouseReport.bytes(kind: kind,
+                                         button: button,
+                                         col: coord.col,
+                                         row: coord.row,
+                                         option: mods.contains(.option),
+                                         control: mods.contains(.control),
+                                         tracking: modes.mouseTracking,
+                                         encoding: modes.mouseEncoding) {
+            session.write(bytes)
+        }
+        return true
+    }
+
+    private func coord(of event: NSEvent) -> (col: Int, row: Int) {
+        cellCoord(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if sendMouse(event, button: MouseReport.right, kind: .press, coord: coord(of: event)) { return }
+        super.rightMouseDown(with: event)       // falls through to the menu
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        if sendMouse(event, button: MouseReport.right, kind: .release, coord: coord(of: event)) { return }
+        super.rightMouseUp(with: event)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        if sendMouse(event, button: MouseReport.middle, kind: .press, coord: coord(of: event)) { return }
+        super.otherMouseDown(with: event)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        if sendMouse(event, button: MouseReport.middle, kind: .release, coord: coord(of: event)) { return }
+        super.otherMouseUp(with: event)
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
@@ -204,6 +260,8 @@ final class TerminalView: NSView, CALayerDelegate {
                 return                       // don't start a selection
             }
         }
+
+        if sendMouse(event, button: MouseReport.left, kind: .press, coord: coord) { return }
 
         if event.clickCount >= 3 {
             // Triple-click: select the whole visible line.
@@ -292,6 +350,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if sendMouse(event, button: MouseReport.left, kind: .drag, coord: coord(of: event)) { return }
         guard activeSelection != nil else { return }
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
         activeSelection?.end = coord
@@ -299,6 +358,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if sendMouse(event, button: MouseReport.left, kind: .release, coord: coord(of: event)) { return }
         guard var sel = activeSelection else { return }
         sel.dragging = false
         // A pure single click (no drag) clears the selection. Double/triple-click
@@ -313,6 +373,7 @@ final class TerminalView: NSView, CALayerDelegate {
 
     override func mouseMoved(with event: NSEvent) {
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
+        _ = sendMouse(event, button: MouseReport.none, kind: .motion, coord: coord)
         lastMouseCoord = coord
         lastMouseWindowPoint = event.locationInWindow
         updateCursorAffordance()
@@ -399,6 +460,26 @@ final class TerminalView: NSView, CALayerDelegate {
         if rowDelta == 0 { return }
         scrollResidue -= CGFloat(rowDelta) * pointsPerRow
 
+        // An app that asked for tracking gets the wheel as button 64/65
+        // presses instead of scrolling our own viewport.
+        if scrollOffset == 0,
+           !event.modifierFlags.contains(.shift),
+           let session,
+           session.inputModes.mouseTracking != .off {
+            let coord = self.coord(of: event)
+            let button = rowDelta > 0 ? MouseReport.wheelUp : MouseReport.wheelDown
+            let modes = session.inputModes
+            for _ in 0..<min(abs(rowDelta), 8) {
+                if let bytes = MouseReport.bytes(kind: .press, button: button,
+                                                 col: coord.col, row: coord.row,
+                                                 tracking: modes.mouseTracking,
+                                                 encoding: modes.mouseEncoding) {
+                    session.write(bytes)
+                }
+            }
+            return
+        }
+
         let next = scrollOffset + rowDelta
         scrollOffset = max(0, min(next, lastScrollbackLines))
     }
@@ -445,7 +526,16 @@ final class TerminalView: NSView, CALayerDelegate {
         // Most shells expect carriage returns, not line feeds, for "enter".
         var normalized = str.replacingOccurrences(of: "\r\n", with: "\r")
         normalized = normalized.replacingOccurrences(of: "\n", with: "\r")
-        session.write(Array(normalized.utf8))
+        // Bracketed paste (?2004): the child asked to be told where a paste
+        // starts and ends, so a multi-line paste lands in its line editor
+        // instead of executing a command per newline.
+        if session.inputModes.bracketedPaste {
+            session.write(Array("\u{1B}[200~".utf8)
+                          + Array(normalized.utf8)
+                          + Array("\u{1B}[201~".utf8))
+        } else {
+            session.write(Array(normalized.utf8))
+        }
     }
 
     @objc func copy(_ sender: Any?) {
@@ -759,6 +849,7 @@ final class TerminalView: NSView, CALayerDelegate {
 
     @objc private func tick(_ sender: CADisplayLink) {
         ensureSession()
+        reportFocusIfChanged()
         reconcileThemeIfChanged()
         reconcileFontIfChanged()
         // While the child holds a synchronized update open (DEC 2026), hold the
@@ -767,6 +858,17 @@ final class TerminalView: NSView, CALayerDelegate {
         // A resize still presents, since setFrameSize calls renderFrame direct.
         if session?.isSynchronizedUpdateActive == true { return }
         renderFrame()
+    }
+
+    /// Focus reporting (?1004): apps that highlight the focused pane want to
+    /// know when the window goes key. Only asks the session about the mode when
+    /// focus actually changed, so the common case costs one Bool compare.
+    private func reportFocusIfChanged() {
+        let focused = window?.isKeyWindow ?? false
+        guard focused != lastReportedFocus else { return }
+        lastReportedFocus = focused
+        guard let session, session.inputModes.reportFocus else { return }
+        session.write(Array((focused ? "\u{1B}[I" : "\u{1B}[O").utf8))
     }
 
     /// Builds the latest snapshot and presents one frame. Driven by the display
