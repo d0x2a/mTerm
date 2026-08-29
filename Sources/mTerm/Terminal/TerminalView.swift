@@ -62,6 +62,18 @@ final class TerminalView: NSView, CALayerDelegate {
     /// output scrolled since, the live value would map the click onto whatever
     /// has moved into that row instead.
     private var lastScrolledRows: Int = 0
+
+    /// Something that affects the next frame changed. Cleared once presented.
+    /// Starts true so the first tick always draws.
+    private var needsFrame = true
+    private var lastPresentTime: CFTimeInterval = 0
+    private var lastRenderedBlink = false
+    /// Display refresh period, learned from the display link.
+    private var frameInterval: CFTimeInterval = 1.0 / 60.0
+    /// Safety net for the dirty check: redraw at least this often even when
+    /// nothing looks dirty, so a state change nobody flagged can't leave a
+    /// stale frame on screen indefinitely.
+    private static let maxIdleInterval: CFTimeInterval = 0.25
     /// Alt-screen state as of the last frame, to spot the swap.
     private var lastUsingAlt: Bool = false
 
@@ -109,6 +121,7 @@ final class TerminalView: NSView, CALayerDelegate {
         let new = ThemeStore.currentTheme
         let old = lastAppliedTheme
         guard old != new else { return }
+        invalidate()
         lastAppliedTheme = new
         session?.applyThemeChange(from: old, to: new)
     }
@@ -124,6 +137,7 @@ final class TerminalView: NSView, CALayerDelegate {
             || s.strokeWeight != lastAppliedStrokeWeight
             || s.lineHeight != lastAppliedLineHeight
         else { return }
+        invalidate()
         lastAppliedFontFamily = s.fontFamily
         lastAppliedFontSize = s.fontSize
         lastAppliedStrokeWeight = s.strokeWeight
@@ -199,6 +213,15 @@ final class TerminalView: NSView, CALayerDelegate {
         guard let session else { return super.keyDown(with: event) }
         let bytes = bytesForKey(event)
         if !bytes.isEmpty {
+            // Only invalidate when the keystroke itself changes the screen:
+            // snapping back from scrollback, dropping a selection, or waking a
+            // blinked-off cursor. The typed character appears when the echo
+            // arrives, and presenting a frame now would show the grid *without*
+            // it -- and arm the once-per-frame limiter against the echo, which
+            // is the frame that actually matters.
+            if scrollOffset != 0 || activeSelection != nil || !cursorBlinkOn() {
+                invalidate()
+            }
             scrollOffset = 0          // typing always snaps to bottom
             scrollResidue = 0
             activeSelection = nil
@@ -263,6 +286,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        invalidate()
         window?.makeFirstResponder(self)
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -386,6 +410,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        invalidate()
         if sendMouse(event, button: MouseReport.left, kind: .drag, coord: coord(of: event)) { return }
         guard activeSelection != nil else { return }
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
@@ -394,6 +419,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        invalidate()
         if sendMouse(event, button: MouseReport.left, kind: .release, coord: coord(of: event)) { return }
         guard var sel = activeSelection else { return }
         sel.dragging = false
@@ -408,6 +434,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        invalidate()
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
         _ = sendMouse(event, button: MouseReport.none, kind: .motion, coord: coord)
         lastMouseCoord = coord
@@ -416,6 +443,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func mouseExited(with event: NSEvent) {
+        invalidate()
         lastMouseCoord = nil
         lastMouseWindowPoint = nil
         commandHeld = false
@@ -423,6 +451,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func flagsChanged(with event: NSEvent) {
+        invalidate()
         let cmd = event.modifierFlags.contains(.command)
         if cmd != commandHeld {
             commandHeld = cmd
@@ -459,6 +488,24 @@ final class TerminalView: NSView, CALayerDelegate {
         } else {
             NSCursor.iBeam.set()
         }
+    }
+
+    /// Marks the next tick as needing a frame. Cheap enough to call from any
+    /// event handler that can change what's on screen.
+    private func invalidate() { needsFrame = true }
+
+    /// New output landed. Present it now instead of waiting for the next
+    /// display-link tick: measured at ~7.7 ms of the ~9.4 ms a keystroke spent
+    /// getting to the screen, because key handling and the tick share the main
+    /// run loop, so an echo reliably just missed the frame being drawn.
+    ///
+    /// Rate-limited to one present per refresh period — under a firehose the
+    /// display can't show more than that anyway, and the tick picks up whatever
+    /// is still pending.
+    private func sessionDidOutput() {
+        needsFrame = true
+        guard CACurrentMediaTime() - lastPresentTime >= frameInterval else { return }
+        renderFrame()
     }
 
     /// Maps a viewport row to its absolute line. The top visible line is
@@ -513,6 +560,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        invalidate()
         guard let renderer else { return }
         let pointsPerRow = CGFloat(renderer.layout.cellHeight) / CGFloat(renderer.layout.scale)
         guard pointsPerRow > 0 else { return }
@@ -618,6 +666,7 @@ final class TerminalView: NSView, CALayerDelegate {
     /// selections in absolute lines can now express. Copy All remains the
     /// one-step version that skips the selection entirely.
     override func selectAll(_ sender: Any?) {
+        invalidate()
         guard let session, let bounds = session.contentBounds() else {
             activeSelection = nil      // empty buffer, nothing to select
             return
@@ -691,13 +740,13 @@ final class TerminalView: NSView, CALayerDelegate {
     private func closeSearch() {
         searchBar?.removeFromSuperview()
         searchBar = nil
-        search = nil
+        invalidate(); search = nil
         window?.makeFirstResponder(self)
     }
 
     private func updateSearch(query: String, regex: Bool) {
         guard let session, !query.isEmpty else {
-            search = nil
+            invalidate(); search = nil
             searchBar?.matchCount = 0
             return
         }
@@ -712,7 +761,7 @@ final class TerminalView: NSView, CALayerDelegate {
             state.currentIndex = matches.firstIndex(where: { $0.absoluteLine >= topAbs }) ?? 0
             scrollToMatch(matches[state.currentIndex])
         }
-        search = state
+        invalidate(); search = state
         searchBar?.matchCount = matches.count
         searchBar?.currentMatch = state.currentIndex
     }
@@ -721,7 +770,7 @@ final class TerminalView: NSView, CALayerDelegate {
         guard var s = search, !s.matches.isEmpty else { return }
         let n = s.matches.count
         s.currentIndex = ((s.currentIndex + delta) % n + n) % n
-        search = s
+        invalidate(); search = s
         searchBar?.currentMatch = s.currentIndex
         scrollToMatch(s.matches[s.currentIndex])
     }
@@ -739,6 +788,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     @objc func jumpToPreviousPrompt(_ sender: Any?) {
+        invalidate()
         guard let session,
               let newOffset = session.jumpToPrompt(direction: -1, from: scrollOffset)
         else { return }
@@ -747,6 +797,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     @objc func jumpToNextPrompt(_ sender: Any?) {
+        invalidate()
         guard let session else { return }
         // direction > 0 returns 0 if no prompt below — i.e. snap to bottom.
         scrollOffset = session.jumpToPrompt(direction: 1, from: scrollOffset) ?? 0
@@ -875,6 +926,9 @@ final class TerminalView: NSView, CALayerDelegate {
     private func ensureSession() {
         guard session == nil, let (cols, rows) = gridDimensions() else { return }
         let s = Session(cols: cols, rows: rows, cwd: initialCwd)
+        s?.onOutput = { [weak self] in
+            self?.sessionDidOutput()
+        }
         s?.onChildExit = { [weak self] in
             guard let self else { return }
             self.delegate?.terminalViewDidTerminate(self)
@@ -897,6 +951,7 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     @objc private func tick(_ sender: CADisplayLink) {
+        if sender.duration > 0 { frameInterval = sender.duration }
         ensureSession()
         reportFocusIfChanged()
         reconcileThemeIfChanged()
@@ -906,6 +961,13 @@ final class TerminalView: NSView, CALayerDelegate {
         // download list, say — would otherwise be sampled mid-redraw and tear.
         // A resize still presents, since setFrameSize calls renderFrame direct.
         if session?.isSynchronizedUpdateActive == true { return }
+        // Idle ticks used to rebuild and present the whole grid 120 times a
+        // second whether or not a pixel had changed. The blink phase is part of
+        // the check because it's the one thing that legitimately changes on a
+        // timer rather than in response to an event.
+        let blink = cursorBlinkOn()
+        let stale = CACurrentMediaTime() - lastPresentTime >= Self.maxIdleInterval
+        guard needsFrame || blink != lastRenderedBlink || stale else { return }
         renderFrame()
     }
 
@@ -916,6 +978,7 @@ final class TerminalView: NSView, CALayerDelegate {
         let focused = window?.isKeyWindow ?? false
         guard focused != lastReportedFocus else { return }
         lastReportedFocus = focused
+        invalidate()          // the cursor only draws in a focused window
         guard let session, session.inputModes.reportFocus else { return }
         session.write(Array((focused ? "\u{1B}[I" : "\u{1B}[O").utf8))
     }
@@ -961,6 +1024,9 @@ final class TerminalView: NSView, CALayerDelegate {
         currentTriggerMatches = triggerEvaluator.evaluate(snapshot: snapshot)
 
         let focused = window?.isKeyWindow ?? false
+        needsFrame = false
+        lastRenderedBlink = cursorBlinkOn()
+        lastPresentTime = CACurrentMediaTime()
         renderer.render(to: metalLayer,
                         snapshot: snapshot,
                         selection: viewportSelection(snapshot: snapshot),

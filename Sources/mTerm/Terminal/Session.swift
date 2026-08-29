@@ -13,6 +13,15 @@ final class Session {
     /// (i.e. the child shell process has exited).
     var onChildExit: (() -> Void)?
 
+    /// Called on the main thread once the child has produced output. Lets the
+    /// view present as soon as bytes land instead of polling for them: the
+    /// display link and key handling share the main run loop, so an echo
+    /// consistently just missed the frame being drawn and waited out most of
+    /// the next one.
+    var onOutput: (() -> Void)?
+    private let signalLock = NSLock()
+    private var outputSignalPending = false
+
     /// Called on the main thread when the child rings the terminal bell.
     var onBell: (() -> Void)?
 
@@ -155,7 +164,25 @@ final class Session {
         }
     }
 
+    /// Coalesced hop to the main thread: one pending signal at a time, so a
+    /// burst of reads can't flood the main queue with redundant wake-ups.
+    private func signalOutput() {
+        signalLock.lock()
+        if outputSignalPending { signalLock.unlock(); return }
+        outputSignalPending = true
+        signalLock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.signalLock.lock()
+            self.outputSignalPending = false
+            self.signalLock.unlock()
+            self.onOutput?()
+        }
+    }
+
     private func drain() {
+        var produced = false
+        defer { if produced { signalOutput() } }
         var buf = [UInt8](repeating: 0, count: 8192)
         while true {
             let n = buf.withUnsafeMutableBufferPointer { ptr in
@@ -166,6 +193,7 @@ final class Session {
                     let slice = UnsafeBufferPointer(start: ptr.baseAddress, count: Int(n))
                     parser.feed(bytes: slice)
                 }
+                produced = true
             } else if n == 0 {
                 readSource?.cancel()
                 notifyChildExit()
