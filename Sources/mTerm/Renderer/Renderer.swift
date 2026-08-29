@@ -10,6 +10,9 @@ private struct CellInstance {
     var atlasPos: SIMD2<Float>
     var atlasSize: SIMD2<Float>
     var fgColor: SIMD4<Float>
+    /// 1 = sample the color atlas as-is, 0 = tint the coverage atlas with
+    /// fgColor. A float because it rides along to the shader as vertex data.
+    var isColor: Float
 }
 
 private struct FlatInstance {
@@ -21,6 +24,7 @@ private struct FlatInstance {
 private struct Uniforms {
     var viewportSize: SIMD2<Float>
     var atlasSize: SIMD2<Float>
+    var colorAtlasSize: SIMD2<Float>
 }
 
 enum HighlightStyle {
@@ -293,7 +297,6 @@ final class Renderer {
                 // double-width glyph — its head already drew across both cells.
                 if cell.isContinuation { continue }
                 if cell.scalar == " " { continue }
-                if cell.scalar.value > UInt32(UInt16.max) { continue }
                 guard let entry = glyphAtlas.entry(for: cell.scalar),
                       entry.atlasSize.x > 0 else { continue }
 
@@ -315,7 +318,8 @@ final class Renderer {
                     glyphSize: entry.atlasSize,
                     atlasPos: entry.atlasOrigin,
                     atlasSize: entry.atlasSize,
-                    fgColor: glyphFg
+                    fgColor: glyphFg,
+                    isColor: entry.isColor ? 1 : 0
                 ))
             }
         }
@@ -371,7 +375,9 @@ final class Renderer {
 
         var uniforms = Uniforms(
             viewportSize: SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height)),
-            atlasSize: SIMD2<Float>(Float(glyphAtlas.width), Float(glyphAtlas.height))
+            atlasSize: SIMD2<Float>(Float(glyphAtlas.width), Float(glyphAtlas.height)),
+            colorAtlasSize: SIMD2<Float>(Float(glyphAtlas.colorWidth),
+                                         Float(glyphAtlas.colorHeight))
         )
 
         let bg = ThemeStore.currentTheme.background
@@ -405,6 +411,7 @@ final class Renderer {
             enc.setVertexBuffer(buf, offset: 0, index: 0)
             enc.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
             enc.setFragmentTexture(glyphAtlas.texture, index: 0)
+            enc.setFragmentTexture(glyphAtlas.colorTexture, index: 1)
             enc.setFragmentSamplerState(sampler, index: 0)
             enc.drawPrimitives(
                 type: .triangleStrip,
