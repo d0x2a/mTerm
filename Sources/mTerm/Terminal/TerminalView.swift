@@ -35,12 +35,17 @@ final class TerminalView: NSView, CALayerDelegate {
     private var lastReportedFocus: Bool = false
     private var lastInputTime: CFTimeInterval = CACurrentMediaTime()
 
+    /// A selection in progress. Rows are *absolute* line numbers — the same
+    /// space as Prompt.absoluteLine — so the span stays glued to its text as
+    /// output scrolls it up or the user scrolls away from it. Converted to
+    /// viewport rows only for drawing, by viewportSelection(snapshot:).
     private struct ActiveSelection {
         var anchor: (col: Int, row: Int)
         var end: (col: Int, row: Int)
         var dragging: Bool
 
-        var normalized: Selection {
+        /// Endpoints in document order. Rows are absolute lines.
+        var absoluteRange: Selection {
             let aBeforeE = anchor.row < end.row
                 || (anchor.row == end.row && anchor.col <= end.col)
             let s = aBeforeE ? anchor : end
@@ -51,6 +56,14 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     private var activeSelection: ActiveSelection?
+    /// scrolledRows from the most recent rendered frame. Mouse hits resolve
+    /// against this rather than the session's live value on purpose: a click
+    /// lands on the text the user can see, which is the frame we last drew. If
+    /// output scrolled since, the live value would map the click onto whatever
+    /// has moved into that row instead.
+    private var lastScrolledRows: Int = 0
+    /// Alt-screen state as of the last frame, to spot the swap.
+    private var lastUsingAlt: Bool = false
 
     private struct SearchState {
         var query: String
@@ -263,19 +276,40 @@ final class TerminalView: NSView, CALayerDelegate {
 
         if sendMouse(event, button: MouseReport.left, kind: .press, coord: coord) { return }
 
+        // Shift+click extends the existing selection rather than starting a new
+        // one. The edge nearer the click is the one that moves; the far edge
+        // becomes the anchor, so shift-clicking to the left of a double-clicked
+        // word keeps that word's right edge pinned instead of collapsing onto
+        // its start. With nothing selected yet, shift+click falls through and
+        // begins a selection like a plain click.
+        if mods.contains(.shift), let current = activeSelection {
+            let sel = current.absoluteRange
+            let start = (col: sel.startCol, row: sel.startRow)
+            let end   = (col: sel.endCol,   row: sel.endRow)
+            let hit = absCoord(coord)
+            let beforeStart = hit.row < start.row
+                || (hit.row == start.row && hit.col < start.col)
+            activeSelection = ActiveSelection(anchor: beforeStart ? end : start,
+                                              end: hit,
+                                              dragging: true)
+            return
+        }
+
         if event.clickCount >= 3 {
             // Triple-click: select the whole visible line.
             let lastCol = max(0, lastSnapshotCols - 1)
+            let line = absoluteLine(forViewportRow: coord.row)
             activeSelection = ActiveSelection(
-                anchor: (col: 0, row: coord.row),
-                end:    (col: lastCol, row: coord.row),
+                anchor: (col: 0, row: line),
+                end:    (col: lastCol, row: line),
                 dragging: false
             )
         } else if event.clickCount == 2 {
             // Double-click: select the word under the cursor.
             activeSelection = wordSelection(at: coord)
         } else {
-            activeSelection = ActiveSelection(anchor: coord, end: coord, dragging: true)
+            let hit = absCoord(coord)
+            activeSelection = ActiveSelection(anchor: hit, end: hit, dragging: true)
         }
     }
 
@@ -283,7 +317,9 @@ final class TerminalView: NSView, CALayerDelegate {
     /// of word characters (alphanumerics plus punctuation common in paths, URLs,
     /// and identifiers); clicking any other character selects just that cell.
     private func wordSelection(at coord: (col: Int, row: Int)) -> ActiveSelection {
-        let single = ActiveSelection(anchor: coord, end: coord, dragging: false)
+        let line = absoluteLine(forViewportRow: coord.row)
+        let single = ActiveSelection(anchor: (col: coord.col, row: line),
+                                     end: (col: coord.col, row: line), dragging: false)
         guard let session else { return single }
         let snapshot = session.snapshot(scrollOffset: scrollOffset)
         let cols = snapshot.cols
@@ -295,15 +331,15 @@ final class TerminalView: NSView, CALayerDelegate {
 
         let clicked = min(coord.col, cols - 1)
         guard isWord(clicked) else {
-            return ActiveSelection(anchor: (col: clicked, row: coord.row),
-                                   end: (col: clicked, row: coord.row), dragging: false)
+            return ActiveSelection(anchor: (col: clicked, row: line),
+                                   end: (col: clicked, row: line), dragging: false)
         }
         var start = clicked
         while start > 0, isWord(start - 1) { start -= 1 }
         var end = clicked
         while end < cols - 1, isWord(end + 1) { end += 1 }
-        return ActiveSelection(anchor: (col: start, row: coord.row),
-                               end: (col: end, row: coord.row), dragging: false)
+        return ActiveSelection(anchor: (col: start, row: line),
+                               end: (col: end, row: line), dragging: false)
     }
 
     private func isWordChar(_ s: Unicode.Scalar) -> Bool {
@@ -353,7 +389,7 @@ final class TerminalView: NSView, CALayerDelegate {
         if sendMouse(event, button: MouseReport.left, kind: .drag, coord: coord(of: event)) { return }
         guard activeSelection != nil else { return }
         let coord = cellCoord(at: convert(event.locationInWindow, from: nil))
-        activeSelection?.end = coord
+        activeSelection?.end = absCoord(coord)
         activeSelection?.dragging = true
     }
 
@@ -423,6 +459,35 @@ final class TerminalView: NSView, CALayerDelegate {
         } else {
             NSCursor.iBeam.set()
         }
+    }
+
+    /// Maps a viewport row to its absolute line. The top visible line is
+    /// scrolledRows - scrollOffset, matching visiblePrompts and the search
+    /// highlight conversion in composedHighlights.
+    private func absoluteLine(forViewportRow row: Int) -> Int {
+        lastScrolledRows - scrollOffset + row
+    }
+
+    private func absCoord(_ c: (col: Int, row: Int)) -> (col: Int, row: Int) {
+        (col: c.col, row: absoluteLine(forViewportRow: c.row))
+    }
+
+    /// Clips the stored absolute selection onto the current viewport. Returns
+    /// nil when none of it is on screen. A clipped edge loses its column bound
+    /// along with the off-screen row it belonged to, so the visible remainder
+    /// runs to the edge of the grid.
+    private func viewportSelection(snapshot: TerminalSnapshot) -> Selection? {
+        guard let activeSelection, snapshot.rows > 0, snapshot.cols > 0 else { return nil }
+        let sel = activeSelection.absoluteRange
+        let topAbs = snapshot.scrolledRows - snapshot.scrollOffset
+        let lastRow = snapshot.rows - 1
+        let startRow = sel.startRow - topAbs
+        let endRow = sel.endRow - topAbs
+        guard endRow >= 0, startRow <= lastRow else { return nil }
+        return Selection(startCol: startRow < 0 ? 0 : sel.startCol,
+                         startRow: max(0, startRow),
+                         endCol: endRow > lastRow ? snapshot.cols - 1 : sel.endCol,
+                         endRow: min(lastRow, endRow))
     }
 
     private func cellCoord(at point: NSPoint) -> (col: Int, row: Int) {
@@ -540,40 +605,26 @@ final class TerminalView: NSView, CALayerDelegate {
 
     @objc func copy(_ sender: Any?) {
         guard let activeSelection, let session else { return }
-        let snapshot = session.snapshot(scrollOffset: scrollOffset)
-        let text = activeSelection.normalized.extractText(from: snapshot)
+        let sel = activeSelection.absoluteRange
+        let text = session.selectionText(from: sel.startRow, startCol: sel.startCol,
+                                         to: sel.endRow, endCol: sel.endCol)
         guard !text.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
     }
 
-    /// Selects everything currently on screen. Selections live in viewport
-    /// coordinates, so this covers the visible grid only — the whole-buffer
-    /// equivalent is Copy All.
+    /// Selects the whole buffer — scrollback plus the visible grid — which
+    /// selections in absolute lines can now express. Copy All remains the
+    /// one-step version that skips the selection entirely.
     override func selectAll(_ sender: Any?) {
-        guard let session else { return }
-        let snapshot = session.snapshot(scrollOffset: scrollOffset)
-        guard snapshot.cols > 0, snapshot.rows > 0 else { return }
-
-        // Stop at the last cell that actually holds something. Running to the
-        // bottom-right corner instead would drag the empty rows under the
-        // prompt into the copied text as a run of trailing newlines.
-        func lastContentCol(_ row: Int) -> Int? {
-            let base = row * snapshot.cols
-            for c in stride(from: snapshot.cols - 1, through: 0, by: -1) {
-                if !snapshot.cells[base + c].isBlank { return c }
-            }
-            return nil
-        }
-        for row in stride(from: snapshot.rows - 1, through: 0, by: -1) {
-            guard let col = lastContentCol(row) else { continue }
-            activeSelection = ActiveSelection(anchor: (col: 0, row: 0),
-                                              end: (col: col, row: row),
-                                              dragging: false)
+        guard let session, let bounds = session.contentBounds() else {
+            activeSelection = nil      // empty buffer, nothing to select
             return
         }
-        activeSelection = nil          // nothing on screen to select
+        activeSelection = ActiveSelection(anchor: (col: 0, row: bounds.firstLine),
+                                          end: (col: bounds.lastCol, row: bounds.lastLine),
+                                          dragging: false)
     }
 
     /// Copies the whole buffer — scrollback plus the visible grid — regardless
@@ -693,7 +744,6 @@ final class TerminalView: NSView, CALayerDelegate {
         else { return }
         scrollOffset = newOffset
         scrollResidue = 0
-        activeSelection = nil
     }
 
     @objc func jumpToNextPrompt(_ sender: Any?) {
@@ -701,7 +751,6 @@ final class TerminalView: NSView, CALayerDelegate {
         // direction > 0 returns 0 if no prompt below — i.e. snap to bottom.
         scrollOffset = session.jumpToPrompt(direction: 1, from: scrollOffset) ?? 0
         scrollResidue = 0
-        activeSelection = nil
     }
 
     private func bytesForKey(_ event: NSEvent) -> [UInt8] {
@@ -881,10 +930,19 @@ final class TerminalView: NSView, CALayerDelegate {
             ?? TerminalSnapshot(cols: 1, rows: 1, cells: [Cell()],
                                 cursorCol: 0, cursorRow: 0, cursorVisible: false,
                                 scrollbackLines: 0, scrollOffset: 0, title: "",
-                                prompts: [], scrolledRows: 0, currentDirectory: nil)
+                                prompts: [], scrolledRows: 0, currentDirectory: nil,
+                                usingAlt: false)
         lastScrollbackLines = snapshot.scrollbackLines
         lastSnapshotCols = snapshot.cols
         lastSnapshotRows = snapshot.rows
+        lastScrolledRows = snapshot.scrolledRows
+        if snapshot.usingAlt != lastUsingAlt {
+            // Entering or leaving the alt buffer replaces the grid wholesale.
+            // Absolute lines survive the swap but the text under them doesn't,
+            // so a selection held across it would describe nothing.
+            lastUsingAlt = snapshot.usingAlt
+            activeSelection = nil
+        }
         if scrollOffset > lastScrollbackLines {
             scrollOffset = lastScrollbackLines
         }
@@ -905,7 +963,7 @@ final class TerminalView: NSView, CALayerDelegate {
         let focused = window?.isKeyWindow ?? false
         renderer.render(to: metalLayer,
                         snapshot: snapshot,
-                        selection: activeSelection?.normalized,
+                        selection: viewportSelection(snapshot: snapshot),
                         highlights: composedHighlights(snapshot: snapshot),
                         focused: focused,
                         cursorOn: cursorBlinkOn())

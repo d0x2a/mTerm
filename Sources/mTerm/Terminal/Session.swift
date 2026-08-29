@@ -79,6 +79,19 @@ final class Session {
         queue.sync { state.bufferText() }
     }
 
+    /// Absolute-line bounds of everything the buffer holds, for "Select All".
+    func contentBounds() -> (firstLine: Int, lastLine: Int, lastCol: Int)? {
+        queue.sync { state.contentBounds() }
+    }
+
+    /// Text for a selection, in absolute line numbers so it can span scrollback.
+    func selectionText(from startLine: Int, startCol: Int,
+                       to endLine: Int, endCol: Int) -> String {
+        queue.sync {
+            state.text(from: startLine, startCol: startCol, to: endLine, endCol: endCol)
+        }
+    }
+
     var currentDirectory: String? {
         queue.sync { state.currentDirectory }
     }

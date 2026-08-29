@@ -54,6 +54,7 @@ struct TerminalSnapshot {
     let prompts: [PromptMark]      // prompt markers currently visible in the viewport
     let scrolledRows: Int          // total lines ever pushed to scrollback (for absolute coords)
     let currentDirectory: String?  // last OSC 7 reported cwd
+    let usingAlt: Bool             // alt buffer is showing (vim, less, ...)
 }
 
 /// A regex/substring match somewhere in scrollback or the active grid. Both
@@ -73,6 +74,9 @@ struct PromptMark {
 
 /// A normalized rectangular-by-line text selection in viewport coords.
 /// Both endpoints are inclusive.
+/// A selected span in *viewport* rows, for drawing. The view stores selections
+/// in absolute lines and converts to this at render time — see
+/// TerminalView.viewportSelection(snapshot:).
 struct Selection {
     let startCol: Int
     let startRow: Int
@@ -85,30 +89,6 @@ struct Selection {
         if row == startRow { return col >= startCol }
         if row == endRow { return col <= endCol }
         return true
-    }
-
-    /// Extracts the selected text from a snapshot, joining rows with "\n" and
-    /// trimming trailing whitespace per row.
-    func extractText(from snapshot: TerminalSnapshot) -> String {
-        guard startRow >= 0, endRow < snapshot.rows else { return "" }
-        var lines: [String] = []
-        for r in startRow...endRow {
-            let firstCol = (r == startRow) ? startCol : 0
-            let lastCol  = (r == endRow)   ? endCol   : snapshot.cols - 1
-            var line = ""
-            for c in firstCol...lastCol {
-                let cell = snapshot.cells[r * snapshot.cols + c]
-                if cell.isContinuation { continue }
-                line.unicodeScalars.append(cell.scalar)
-            }
-            // Strip trailing spaces from each row except the last (so single-line
-            // selections preserve trailing spaces if you actually selected them).
-            if r != endRow {
-                while line.last == " " { line.removeLast() }
-            }
-            lines.append(line)
-        }
-        return lines.joined(separator: "\n")
     }
 }
 
@@ -297,7 +277,8 @@ final class TerminalState: ParserSink {
                 title: title,
                 prompts: visiblePrompts(offset: 0),
                 scrolledRows: scrolledRows,
-                currentDirectory: currentDirectory
+                currentDirectory: currentDirectory,
+                usingAlt: usingAlt
             )
         }
 
@@ -335,7 +316,8 @@ final class TerminalState: ParserSink {
             title: title,
             prompts: visiblePrompts(offset: offset),
             scrolledRows: scrolledRows,
-            currentDirectory: currentDirectory
+            currentDirectory: currentDirectory,
+            usingAlt: usingAlt
         )
     }
 
@@ -811,6 +793,68 @@ final class TerminalState: ParserSink {
             lines.append(Self.rowText(Array(cells[r * cols ..< (r + 1) * cols])))
         }
         while let last = lines.last, last.isEmpty { lines.removeLast() }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The row at an absolute line number — the same coordinate space as
+    /// Prompt.absoluteLine and SearchMatch.absoluteLine. Scrollback holds
+    /// [scrolledRows - scrollback.count, scrolledRows); the active grid picks
+    /// up from there. Returns nil for lines that have been trimmed off the top
+    /// of history or sit past the bottom of the grid.
+    private func row(atAbsolute line: Int) -> [Cell]? {
+        let topOfHistory = scrolledRows - scrollback.count
+        if line < topOfHistory { return nil }
+        if line < scrolledRows { return scrollback[line - topOfHistory] }
+        let r = line - scrolledRows
+        guard r >= 0, r < rows else { return nil }
+        return Array(cells[r * cols ..< (r + 1) * cols])
+    }
+
+    /// The span of the buffer that actually holds something, in absolute lines:
+    /// the oldest retained line through the last non-blank one, with that
+    /// line's last non-blank column. Returns nil for an empty buffer. Stopping
+    /// at real content keeps Select All from dragging the empty rows below the
+    /// prompt in as a run of trailing newlines.
+    func contentBounds() -> (firstLine: Int, lastLine: Int, lastCol: Int)? {
+        let firstLine = scrolledRows - scrollback.count
+        let lastPossible = scrolledRows + rows - 1
+        var line = lastPossible
+        while line >= firstLine {
+            if let row = row(atAbsolute: line),
+               let col = row.lastIndex(where: { !$0.isBlank }) {
+                return (firstLine, line, col)
+            }
+            line -= 1
+        }
+        return nil
+    }
+
+    /// Text for an absolute-line range, spanning scrollback and the active
+    /// grid. Lines that have aged out of scrollback are skipped, so a selection
+    /// older than the buffer yields whatever survives of it.
+    func text(from startLine: Int, startCol: Int, to endLine: Int, endCol: Int) -> String {
+        guard endLine >= startLine else { return "" }
+        var lines: [String] = []
+        for line in startLine...endLine {
+            guard let row = row(atAbsolute: line) else { continue }
+            // Resize doesn't reflow history, so a scrollback row keeps whatever
+            // width it was pushed at. Bound the range by this row rather than by
+            // the current grid width, which may be wider or narrower.
+            let firstCol = (line == startLine) ? max(0, startCol) : 0
+            let lastCol  = min((line == endLine) ? endCol : row.count - 1, row.count - 1)
+            var text = ""
+            if firstCol <= lastCol {
+                for c in firstCol...lastCol where !row[c].isContinuation {
+                    text.unicodeScalars.append(row[c].scalar)
+                }
+            }
+            // Strip trailing spaces from each row except the last (so single-line
+            // selections preserve trailing spaces if you actually selected them).
+            if line != endLine {
+                while text.last == " " { text.removeLast() }
+            }
+            lines.append(text)
+        }
         return lines.joined(separator: "\n")
     }
 
