@@ -599,7 +599,7 @@ final class TerminalState: ParserSink {
         }
     }
 
-    func parserOSC(_ data: [UInt8]) {
+    func parserOSC(_ data: [UInt8], terminator: UInt8) {
         // OSC payload format: "<code>;<text>" (133 uses single-letter subcommands)
         guard let semi = data.firstIndex(of: 0x3B) else {
             // OSC with no semicolon — could be 133 with no payload, but our
@@ -634,11 +634,69 @@ final class TerminalState: ParserSink {
                 let body = parts.count >= 3 ? String(parts[2]) : ""
                 onNotify?(title, body)
             }
+        case 4:                                 // indexed palette color
+            reportPaletteColors(payload, terminator: terminator)
+        case 10, 11, 12:                        // foreground / background / cursor
+            reportDynamicColors(from: code, payload: payload, terminator: terminator)
         case 133:
             handlePrompt133(payload)
         default:
             break
         }
+    }
+
+    /// OSC 10/11/12 with a "?" argument asks us to report the foreground,
+    /// background or cursor color. Programs read the background answer to tell
+    /// a light theme from a dark one; a terminal that stays silent gets treated
+    /// as dark, which is why light themes looked wrong before we replied.
+    ///
+    /// Arguments are positional — each one after the OSC number steps to the
+    /// next dynamic color, so `OSC 10;?;?` reports foreground then background.
+    /// We only answer queries; requests to *change* a color are ignored, since
+    /// the theme owns those.
+    private func reportDynamicColors(from code: Int, payload: String, terminator: UInt8) {
+        let theme = ThemeStore.currentTheme
+        let args = payload.split(separator: ";", omittingEmptySubsequences: false)
+        for (offset, arg) in args.enumerated() {
+            guard arg == "?" else { continue }
+            let color: SIMD4<Float>
+            switch code + offset {
+            case 10: color = theme.foreground
+            case 11: color = theme.background
+            case 12: color = theme.cursor
+            default: continue
+            }
+            reply(oscReply("\(code + offset);\(xtermColorSpec(color))", terminator: terminator))
+        }
+    }
+
+    /// OSC 4 ; <index> ; ? — report a palette entry. Arguments come in pairs,
+    /// so one query can ask about several indices.
+    private func reportPaletteColors(_ payload: String, terminator: UInt8) {
+        let args = payload.split(separator: ";", omittingEmptySubsequences: false)
+        var i = 0
+        while i + 1 < args.count {
+            if args[i + 1] == "?", let idx = Int(args[i]), (0...255).contains(idx) {
+                let color = AnsiPalette.indexed256(idx, palette: ThemeStore.currentTheme.ansi)
+                reply(oscReply("4;\(idx);\(xtermColorSpec(color))", terminator: terminator))
+            }
+            i += 2
+        }
+    }
+
+    /// Answers carry whichever string terminator the query used: a program that
+    /// reads up to a BEL would hang waiting on an `ESC \` reply.
+    private func oscReply(_ body: String, terminator: UInt8) -> String {
+        "\u{1B}]" + body + (terminator == 0x07 ? "\u{07}" : "\u{1B}\\")
+    }
+
+    /// xterm's `rgb:RRRR/GGGG/BBBB` reply form: 8-bit channels widened to 16.
+    private func xtermColorSpec(_ c: SIMD4<Float>) -> String {
+        func channel(_ f: Float) -> String {
+            let v8 = UInt16((min(max(f, 0), 1) * 255).rounded())
+            return String(format: "%04x", v8 &* 257)
+        }
+        return "rgb:\(channel(c.x))/\(channel(c.y))/\(channel(c.z))"
     }
 
     private func handlePrompt133(_ payload: String) {

@@ -4,7 +4,7 @@ protocol ParserSink: AnyObject {
     func parserPrint(_ scalar: Unicode.Scalar)
     func parserExecute(_ control: UInt8)
     func parserCSI(_ params: [Int], marker: UInt8?, intermediates: [UInt8], final: UInt8)
-    func parserOSC(_ data: [UInt8])
+    func parserOSC(_ data: [UInt8], terminator: UInt8)
     func parserESC(_ final: UInt8, intermediates: [UInt8])
 }
 
@@ -171,14 +171,14 @@ final class Parser {
 
     private func oscByte(_ b: UInt8) {
         if b == 0x07 {                    // BEL — string terminator
-            sink?.parserOSC(oscBuffer)
+            sink?.parserOSC(oscBuffer, terminator: 0x07)
             oscBuffer.removeAll(keepingCapacity: true)
             state = .ground
             return
         }
         if b == 0x1B {                    // ESC — could be ESC \ ST
             // Eat ESC and look for \\ in the next call; simplest: treat ESC as terminator.
-            sink?.parserOSC(oscBuffer)
+            sink?.parserOSC(oscBuffer, terminator: 0x1B)
             oscBuffer.removeAll(keepingCapacity: true)
             state = .escape
             params.removeAll(keepingCapacity: true)
