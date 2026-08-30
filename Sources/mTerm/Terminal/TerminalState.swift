@@ -26,10 +26,19 @@ struct Cell {
          bg: SIMD4<Float>? = nil,
          attrs: CellAttrs = [],
          width: UInt8 = 1) {
-        let theme = ThemeStore.currentTheme
         self.scalar = scalar
-        self.fg = fg ?? theme.foreground
-        self.bg = bg ?? theme.background
+        // Only reach for the theme when a color is actually missing. That read
+        // takes a lock and copies a Theme — two Strings and an Array, so atomic
+        // refcount traffic on top — while putGlyph, the per-character hot path,
+        // always supplies both colors and threw the result away.
+        if let fg, let bg {
+            self.fg = fg
+            self.bg = bg
+        } else {
+            let theme = ThemeStore.currentTheme
+            self.fg = fg ?? theme.foreground
+            self.bg = bg ?? theme.background
+        }
         self.attrs = attrs
         self.width = width
     }
@@ -290,10 +299,13 @@ final class TerminalState: ParserSink {
         // of the viewport.
         let firstScrollbackIdx = scrollback.count - offset
         let scrollbackRowsShown = min(offset, rows)
+        // Scrollback rows can be shorter than the current width; pad with one
+        // blank rather than constructing a themed Cell per missing column.
+        let padding = Cell()
         for i in 0..<scrollbackRowsShown {
             let row = scrollback[firstScrollbackIdx + i]
             for c in 0..<cols {
-                viewport.append(c < row.count ? row[c] : Cell())
+                viewport.append(c < row.count ? row[c] : padding)
             }
         }
 
@@ -1222,6 +1234,29 @@ final class TerminalState: ParserSink {
         min(row <= scrollBottom ? scrollBottom : rows - 1, row + n)
     }
 
+    /// Blanks `count` cells starting at `index`, building the blank once rather
+    /// than per cell. `Cell()` consults the theme — a lock plus a Theme copy,
+    /// see Cell.init — so a per-column `Cell()` made a full-screen erase cost
+    /// one lock acquisition per cell.
+    private func blankCells(from index: Int, count: Int) {
+        guard count > 0 else { return }
+        let blankCell = Cell()
+        cells.withUnsafeMutableBufferPointer { buf in
+            (buf.baseAddress! + index).update(repeating: blankCell, count: count)
+        }
+    }
+
+    /// Moves `count` cells from `src` to `dst`. Cell is trivially copyable (see
+    /// its `width` note), so this is a memmove rather than a cell-at-a-time
+    /// loop — the ranges are allowed to overlap, and every caller's do.
+    private func moveCells(from src: Int, to dst: Int, count: Int) {
+        guard count > 0 else { return }
+        cells.withUnsafeMutableBufferPointer { buf in
+            let p = buf.baseAddress!
+            memmove(p + dst, p + src, count * MemoryLayout<Cell>.stride)
+        }
+    }
+
     /// Moves rows [top, bottom] up by `n`, blanking what opens up at the bottom
     /// margin. Only a full-screen region on the primary screen feeds scrollback
     /// — a narrower one discards what scrolls off, which is what xterm does —
@@ -1236,15 +1271,10 @@ final class TerminalState: ParserSink {
         }
         let shiftEnd = bottom - lines
         if shiftEnd >= top {
-            for r in top...shiftEnd {
-                let dst = r * cols, src = (r + lines) * cols
-                for c in 0..<cols { cells[dst + c] = cells[src + c] }
-            }
+            moveCells(from: (top + lines) * cols, to: top * cols,
+                      count: (shiftEnd - top + 1) * cols)
         }
-        for r in (bottom - lines + 1)...bottom {
-            let base = r * cols
-            for c in 0..<cols { cells[base + c] = Cell() }
-        }
+        blankCells(from: (bottom - lines + 1) * cols, count: lines * cols)
     }
 
     /// Moves rows [top, bottom] down by `n`, blanking what opens up at the top
@@ -1256,15 +1286,10 @@ final class TerminalState: ParserSink {
 
         let shiftStart = top + lines
         if shiftStart <= bottom {
-            for r in stride(from: bottom, through: shiftStart, by: -1) {
-                let dst = r * cols, src = (r - lines) * cols
-                for c in 0..<cols { cells[dst + c] = cells[src + c] }
-            }
+            moveCells(from: top * cols, to: shiftStart * cols,
+                      count: (bottom - shiftStart + 1) * cols)
         }
-        for r in top...(top + lines - 1) {
-            let base = r * cols
-            for c in 0..<cols { cells[base + c] = Cell() }
-        }
+        blankCells(from: top * cols, count: lines * cols)
     }
 
     private func pushToScrollback(_ lines: Int) {
@@ -1305,22 +1330,14 @@ final class TerminalState: ParserSink {
         switch mode {
         case 0:
             eraseLine(mode: 0)
-            if cursorRow + 1 < rows {
-                for r in (cursorRow + 1)..<rows {
-                    for c in 0..<cols { cells[r * cols + c] = Cell() }
-                }
-            }
+            blankCells(from: (cursorRow + 1) * cols,
+                       count: (rows - cursorRow - 1) * cols)
         case 1:
-            if cursorRow > 0 {
-                for r in 0..<cursorRow {
-                    for c in 0..<cols { cells[r * cols + c] = Cell() }
-                }
-            }
-            for c in 0...min(cursorCol, cols - 1) {
-                cells[cursorRow * cols + c] = Cell()
-            }
+            blankCells(from: 0, count: cursorRow * cols)
+            blankCells(from: cursorRow * cols,
+                       count: min(cursorCol, cols - 1) + 1)
         case 2, 3:
-            for i in 0..<cells.count { cells[i] = Cell() }
+            blankCells(from: 0, count: cells.count)
         default:
             break
         }
@@ -1332,12 +1349,9 @@ final class TerminalState: ParserSink {
         let n = min(count, cols - cursorCol)
         guard n > 0 else { return }
         let base = cursorRow * cols
-        for c in cursorCol..<(cols - n) {
-            cells[base + c] = cells[base + c + n]
-        }
-        for c in (cols - n)..<cols {
-            cells[base + c] = Cell()
-        }
+        moveCells(from: base + cursorCol + n, to: base + cursorCol,
+                  count: cols - cursorCol - n)
+        blankCells(from: base + cols - n, count: n)
     }
 
     /// ICH: shifts the rest of the line right by `count`, dropping whatever
@@ -1347,10 +1361,8 @@ final class TerminalState: ParserSink {
         let n = min(count, cols - col)
         guard n > 0 else { return }
         let base = cursorRow * cols
-        for c in stride(from: cols - 1, through: col + n, by: -1) {
-            cells[base + c] = cells[base + c - n]
-        }
-        for c in col..<(col + n) { cells[base + c] = Cell() }
+        moveCells(from: base + col, to: base + col + n, count: cols - col - n)
+        blankCells(from: base + col, count: n)
     }
 
     /// ECH: blanks `count` cells from the cursor without shifting the line.
@@ -1358,8 +1370,7 @@ final class TerminalState: ParserSink {
         let col = min(cursorCol, cols - 1)
         let n = min(count, cols - col)
         guard n > 0 else { return }
-        let base = cursorRow * cols
-        for c in col..<(col + n) { cells[base + c] = Cell() }
+        blankCells(from: cursorRow * cols + col, count: n)
     }
 
     /// IL / DL. Both are no-ops outside the scrolling region, and both scroll
@@ -1379,11 +1390,11 @@ final class TerminalState: ParserSink {
     private func eraseLine(mode: Int) {
         switch mode {
         case 0:
-            for c in cursorCol..<cols { cells[cursorRow * cols + c] = Cell() }
+            blankCells(from: cursorRow * cols + cursorCol, count: cols - cursorCol)
         case 1:
-            for c in 0...min(cursorCol, cols - 1) { cells[cursorRow * cols + c] = Cell() }
+            blankCells(from: cursorRow * cols, count: min(cursorCol, cols - 1) + 1)
         case 2:
-            for c in 0..<cols { cells[cursorRow * cols + c] = Cell() }
+            blankCells(from: cursorRow * cols, count: cols)
         default:
             break
         }
