@@ -144,6 +144,12 @@ final class TerminalState: ParserSink {
     /// O(cols) rather than O(rows × cols). Kept in [0, rows).
     private var rowOffset = 0
 
+    /// Per-row: did this line run off the right edge and continue on the row
+    /// below? Set only by autowrap, so an explicit newline leaves it false.
+    /// Indexed by ring slot, exactly like `cells`, so rotating `rowOffset`
+    /// carries the flags along with the rows they describe.
+    private var rowWrapped: [Bool] = []
+
     // Scrollback only retains rows evicted from the PRIMARY screen. Alt-screen
     // scrolls (vim, etc.) are discarded — that matches xterm/iTerm behavior.
     /// Scrollback as a ring. Storage grows to `maxScrollback` rows and then
@@ -153,6 +159,10 @@ final class TerminalState: ParserSink {
     /// Rows keep whatever width they had when they were pushed — resize does
     /// not reflow history — so this can't be one flat buffer.
     private var scrollbackStore: [[Cell]] = []
+    /// Wrapped flags for `scrollbackStore`, same ring slots. A line that wrapped
+    /// keeps its continuation marked after it scrolls off, so reflow can rejoin
+    /// it with the rows that followed.
+    private var scrollbackWrapped: [Bool] = []
     private var scrollbackStart = 0      // ring slot holding the oldest row
     private var scrollbackCount = 0
     private let maxScrollback: Int = 10_000
@@ -246,6 +256,7 @@ final class TerminalState: ParserSink {
     // and `stashed*` holds the primary state.
     private var usingAlt: Bool = false
     private var stashedCells: [Cell] = []
+    private var stashedRowWrapped: [Bool] = []
     private var stashedCursor: (col: Int, row: Int) = (0, 0)
     private var stashedFg: PackedColor
     private var stashedBg: PackedColor
@@ -263,6 +274,7 @@ final class TerminalState: ParserSink {
         self.stashedFg = PackedColor(theme.foreground)
         self.stashedBg = PackedColor(theme.background)
         self.cells = Array(repeating: Cell(), count: self.cols * self.rows)
+        self.rowWrapped = Array(repeating: false, count: self.rows)
         self.tabStops = Self.defaultTabStops(cols: self.cols)
     }
 
@@ -271,16 +283,40 @@ final class TerminalState: ParserSink {
         let newRows = max(1, requestedRows)
         if newCols == cols && newRows == rows { return }
 
-        // resizedGrid reads the buffer in logical row order.
+        // Reflow reads the buffer in logical row order.
         normalizeRowOffset()
-        cells = Self.resizedGrid(cells, oldCols: cols, oldRows: rows,
-                                 newCols: newCols, newRows: newRows)
-        if !stashedCells.isEmpty {
-            stashedCells = Self.resizedGrid(stashedCells, oldCols: cols, oldRows: rows,
-                                            newCols: newCols, newRows: newRows)
+
+        if usingAlt {
+            // The alt screen is not reflowed: full-screen apps repaint from
+            // scratch when they see SIGWINCH, and xterm discards its alt
+            // content the same way. The primary buffer stashed behind it does
+            // reflow, so leaving vim lands on a correctly-wrapped shell.
+            cells = Self.resizedGrid(cells, oldCols: cols, oldRows: rows,
+                                     newCols: newCols, newRows: newRows)
+            // The flags have to track `rows` or the next wrap indexes past the
+            // end of the array. The alt screen has no continuations worth
+            // keeping — the app repaints it — so they all start clear.
+            rowWrapped = Array(repeating: false, count: newRows)
+            let r = reflowPrimary(grid: stashedCells, wrapped: stashedRowWrapped,
+                                  cursorCol: stashedCursor.col,
+                                  cursorRow: stashedCursor.row,
+                                  newCols: newCols, newRows: newRows)
+            stashedCells = r.cells
+            stashedRowWrapped = r.wrapped
+            stashedCursor = (r.cursorCol, r.cursorRow)
+        } else {
+            let r = reflowPrimary(grid: cells, wrapped: rowWrapped,
+                                  cursorCol: cursorCol, cursorRow: cursorRow,
+                                  newCols: newCols, newRows: newRows)
+            cells = r.cells
+            rowWrapped = r.wrapped
+            cursorCol = r.cursorCol
+            cursorRow = r.cursorRow
         }
+
         cols = newCols
         rows = newRows
+        rowOffset = 0
         cursorCol = min(cursorCol, cols - 1)
         cursorRow = min(cursorRow, rows - 1)
         stashedCursor.col = min(stashedCursor.col, cols - 1)
@@ -300,6 +336,15 @@ final class TerminalState: ParserSink {
         if rowOffset == 0 { return row * cols }
         let physical = row + rowOffset
         return (physical >= rows ? physical - rows : physical) * cols
+    }
+
+    /// Ring slot holding logical row `row` — the `rowWrapped` counterpart of
+    /// `rowBase`, which gives the same row's offset into `cells`.
+    @inline(__always)
+    private func ringRow(_ row: Int) -> Int {
+        if rowOffset == 0 { return row }
+        let physical = row + rowOffset
+        return physical >= rows ? physical - rows : physical
     }
 
     /// Ring slot holding scrollback row `i`, counting from the oldest.
@@ -337,6 +382,11 @@ final class TerminalState: ParserSink {
                 }
             }
         }
+        // The flags are ring-indexed like the rows, so they rotate alongside.
+        // Computed before rowOffset is cleared, since ringRow reads it.
+        var rebuiltWrapped = [Bool](repeating: false, count: rows)
+        for r in 0..<rows { rebuiltWrapped[r] = rowWrapped[ringRow(r)] }
+        rowWrapped = rebuiltWrapped
         cells = rebuilt
         rowOffset = 0
     }
@@ -442,6 +492,26 @@ final class TerminalState: ParserSink {
         guard width <= cols else { return }
         if cursorCol >= cols {
             if autoWrap {
+                // The row being left continues on the next one; reflow rejoins
+                // them on this flag. Only when real content crossed the edge,
+                // though: zsh's PROMPT_SP pads a partial line with spaces purely
+                // to reach column 0 of the row below, then prints a fresh prompt
+                // there. Joining on that splices the prompt onto the tail of the
+                // line above, and the shell's next redraw from column 0 wipes
+                // that line out.
+                //
+                // The tell is blankness on *both* sides of the boundary — the
+                // padding is spaces going out and spaces coming in. Text that
+                // merely happens to wrap just after a space still has a real
+                // glyph arriving, so it stays joined. Checked in place because
+                // building a Cell() to compare against would take the theme
+                // lock on every wrap.
+                let last = cells[rowBase(cursorRow) + cols - 1]
+                let leavingBlank = last.scalar == " " && last.attrs.isEmpty
+                let arrivingBlank = scalar == " " && currentAttrs.isEmpty
+                if !(leavingBlank && arrivingBlank) {
+                    rowWrapped[ringRow(cursorRow)] = true
+                }
                 cursorCol = 0
                 advanceRow()
             } else {
@@ -454,6 +524,7 @@ final class TerminalState: ParserSink {
         if width == 2 && cursorCol == cols - 1 {
             guard autoWrap else { return }
             cells[rowBase(cursorRow) + cursorCol] = Cell()
+            rowWrapped[ringRow(cursorRow)] = true
             cursorCol = 0
             advanceRow()
         }
@@ -1176,11 +1247,13 @@ final class TerminalState: ParserSink {
         // would leave the offset describing the old geometry.
         normalizeRowOffset()
         stashedCells = cells
+        stashedRowWrapped = rowWrapped
         stashedCursor = (cursorCol, cursorRow)
         stashedFg = currentFg
         stashedBg = currentBg
         stashedAttrs = currentAttrs
         cells = Array(repeating: Cell(), count: cols * rows)
+        rowWrapped = Array(repeating: false, count: rows)
         rowOffset = 0
         cursorCol = 0
         cursorRow = 0
@@ -1196,8 +1269,10 @@ final class TerminalState: ParserSink {
     private func exitAltScreen() {
         if !usingAlt { return }
         cells = stashedCells
+        rowWrapped = stashedRowWrapped
         rowOffset = 0          // stashed already normalized, see enterAltScreen
         stashedCells = []
+        stashedRowWrapped = []
         cursorCol = min(stashedCursor.col, cols - 1)
         cursorRow = min(stashedCursor.row, rows - 1)
         currentFg = stashedFg
@@ -1210,6 +1285,7 @@ final class TerminalState: ParserSink {
 
     private func fullReset() {
         cells = Array(repeating: Cell(), count: cols * rows)
+        rowWrapped = Array(repeating: false, count: rows)
         rowOffset = 0
         cursorCol = 0
         cursorRow = 0
@@ -1367,7 +1443,10 @@ final class TerminalState: ParserSink {
             // entire grid.
             rowOffset += lines
             if rowOffset >= rows { rowOffset -= rows }
-            for r in (rows - lines)..<rows { blankCells(from: rowBase(r), count: cols) }
+            for r in (rows - lines)..<rows {
+                blankCells(from: rowBase(r), count: cols)
+                rowWrapped[ringRow(r)] = false
+            }
             return
         }
         // A margin-bounded region can't rotate — that would drag the rows
@@ -1377,9 +1456,13 @@ final class TerminalState: ParserSink {
         if shiftEnd >= top {
             for r in top...shiftEnd {
                 moveCells(from: rowBase(r + lines), to: rowBase(r), count: cols)
+                rowWrapped[ringRow(r)] = rowWrapped[ringRow(r + lines)]
             }
         }
-        for r in (bottom - lines + 1)...bottom { blankCells(from: rowBase(r), count: cols) }
+        for r in (bottom - lines + 1)...bottom {
+            blankCells(from: rowBase(r), count: cols)
+            rowWrapped[ringRow(r)] = false
+        }
     }
 
     /// Moves rows [top, bottom] down by `n`, blanking what opens up at the top
@@ -1392,7 +1475,10 @@ final class TerminalState: ParserSink {
         if top == 0 && bottom == rows - 1 {
             rowOffset -= lines
             if rowOffset < 0 { rowOffset += rows }   // lines <= rows, so one wrap
-            for r in 0..<lines { blankCells(from: rowBase(r), count: cols) }
+            for r in 0..<lines {
+                blankCells(from: rowBase(r), count: cols)
+                rowWrapped[ringRow(r)] = false
+            }
             return
         }
         let shiftStart = top + lines
@@ -1400,9 +1486,13 @@ final class TerminalState: ParserSink {
             // Descending, so a row is never overwritten before it is read.
             for r in stride(from: bottom, through: shiftStart, by: -1) {
                 moveCells(from: rowBase(r - lines), to: rowBase(r), count: cols)
+                rowWrapped[ringRow(r)] = rowWrapped[ringRow(r - lines)]
             }
         }
-        for r in top...(top + lines - 1) { blankCells(from: rowBase(r), count: cols) }
+        for r in top...(top + lines - 1) {
+            blankCells(from: rowBase(r), count: cols)
+            rowWrapped[ringRow(r)] = false
+        }
     }
 
     private func pushToScrollback(_ lines: Int) {
@@ -1426,6 +1516,7 @@ final class TerminalState: ParserSink {
         let base = rowBase(row)
         if scrollbackCount < maxScrollback {
             scrollbackStore.append(gridRow(row))
+            scrollbackWrapped.append(rowWrapped[ringRow(row)])
             scrollbackCount += 1
             return
         }
@@ -1442,6 +1533,7 @@ final class TerminalState: ParserSink {
                                                             count: cols))
         }
         scrollbackStore[slot] = recycled
+        scrollbackWrapped[slot] = rowWrapped[ringRow(row)]
         scrollbackStart = slot + 1 == scrollbackStore.count ? 0 : slot + 1
     }
 
@@ -1464,14 +1556,21 @@ final class TerminalState: ParserSink {
         case 0:
             eraseLine(mode: 0)
             if cursorRow + 1 < rows {
-                for r in (cursorRow + 1)..<rows { blankCells(from: rowBase(r), count: cols) }
+                for r in (cursorRow + 1)..<rows {
+                    blankCells(from: rowBase(r), count: cols)
+                    rowWrapped[ringRow(r)] = false
+                }
             }
         case 1:
-            for r in 0..<cursorRow { blankCells(from: rowBase(r), count: cols) }
+            for r in 0..<cursorRow {
+                blankCells(from: rowBase(r), count: cols)
+                rowWrapped[ringRow(r)] = false
+            }
             blankCells(from: rowBase(cursorRow), count: min(cursorCol, cols - 1) + 1)
         case 2, 3:
             // Every row is cleared, so ring order doesn't matter here.
             blankCells(from: 0, count: cells.count)
+            for i in rowWrapped.indices { rowWrapped[i] = false }
         default:
             break
         }
@@ -1525,10 +1624,13 @@ final class TerminalState: ParserSink {
         switch mode {
         case 0:
             blankCells(from: rowBase(cursorRow) + cursorCol, count: cols - cursorCol)
+            // The row no longer reaches the right edge, so it no longer wraps.
+            rowWrapped[ringRow(cursorRow)] = false
         case 1:
             blankCells(from: rowBase(cursorRow), count: min(cursorCol, cols - 1) + 1)
         case 2:
             blankCells(from: rowBase(cursorRow), count: cols)
+            rowWrapped[ringRow(cursorRow)] = false
         default:
             break
         }
@@ -1600,6 +1702,222 @@ final class TerminalState: ParserSink {
     }
 
     // MARK: helpers
+
+    /// Rejoins every wrapped line across scrollback and the primary grid,
+    /// re-splits it at `newCols`, then hands the last `newRows` rows back as
+    /// the grid and keeps the rest as history.
+    ///
+    /// This renumbers absolute lines — a line spanning three rows at 40 columns
+    /// spans one at 120 — so prompt markers are carried across by the logical
+    /// line they sit on rather than by their old index.
+    private func reflowPrimary(grid: [Cell], wrapped: [Bool],
+                               cursorCol: Int, cursorRow: Int,
+                               newCols: Int, newRows: Int)
+        -> (cells: [Cell], wrapped: [Bool], cursorCol: Int, cursorRow: Int) {
+
+        let blank = Cell()
+
+        // 1. Every primary row that exists, oldest first.
+        struct SourceRow { let cells: [Cell]; let wrapped: Bool; let absolute: Int }
+        var source: [SourceRow] = []
+        source.reserveCapacity(scrollbackCount + rows)
+        let topOfHistory = scrolledRows - scrollbackCount
+        for i in 0..<scrollbackCount {
+            source.append(SourceRow(cells: scrollbackRow(i),
+                                    wrapped: scrollbackWrapped[scrollbackSlot(i)],
+                                    absolute: topOfHistory + i))
+        }
+        for r in 0..<rows {
+            let base = r * cols          // normalizeRowOffset ran before the call
+            source.append(SourceRow(cells: Array(grid[base ..< base + cols]),
+                                    wrapped: wrapped[r],
+                                    absolute: scrolledRows + r))
+        }
+
+        // 2. Join wrapped runs into logical lines. `used` is the meaningful
+        //    length; the array behind it may be longer (trailing blanks) and
+        //    that is fine — the grid copy truncates and scrollback tolerates
+        //    any width, so a line that already fits keeps its storage instead
+        //    of being rebuilt. That fast path is most of the buffer, and doing
+        //    every row the slow way cost ~18ms a step on a live window drag.
+        struct Logical { var cells: [Cell]; var used: Int }
+        var logicals: [Logical] = []
+        logicals.reserveCapacity(source.count)
+        var absoluteToLogical: [Int: Int] = [:]
+        absoluteToLogical.reserveCapacity(source.count)
+        let cursorAbsolute = scrolledRows + cursorRow
+        var cursorLogical = 0
+        var cursorOffset = 0
+
+        var i = 0
+        while i < source.count {
+            let first = source[i]
+            if !first.wrapped {
+                let used = Self.trimmedCount(first.cells, blank: blank)
+                if used <= newCols {
+                    absoluteToLogical[first.absolute] = logicals.count
+                    if first.absolute == cursorAbsolute {
+                        cursorLogical = logicals.count
+                        cursorOffset = cursorCol
+                    }
+                    logicals.append(Logical(cells: first.cells, used: used))
+                    i += 1
+                    continue
+                }
+            }
+            // Slow path: rejoin the run. A wrapped row is full by definition,
+            // so it contributes every column; only the row ending the line has
+            // trailing blanks worth dropping.
+            var joined: [Cell] = []
+            var j = i
+            while true {
+                let row = source[j]
+                absoluteToLogical[row.absolute] = logicals.count
+                if row.absolute == cursorAbsolute {
+                    cursorLogical = logicals.count
+                    cursorOffset = joined.count + cursorCol
+                }
+                if row.wrapped && j + 1 < source.count {
+                    joined.append(contentsOf: row.cells)
+                    j += 1
+                } else {
+                    joined.append(contentsOf: row.cells[0 ..< Self.trimmedCount(row.cells, blank: blank)])
+                    break
+                }
+            }
+            logicals.append(Logical(cells: joined, used: joined.count))
+            i = j + 1
+        }
+
+        // 3. Re-split each logical line at the new width.
+        var rebuilt: [(cells: [Cell], wrapped: Bool)] = []
+        rebuilt.reserveCapacity(logicals.count)
+        var logicalFirstRow = [Int](repeating: 0, count: logicals.count)
+        var newCursorRowIndex = 0
+        var newCursorCol = 0
+
+        for (li, line) in logicals.enumerated() {
+            logicalFirstRow[li] = rebuilt.count
+
+            if line.used <= newCols {
+                rebuilt.append((cells: line.cells, wrapped: false))
+                if li == cursorLogical {
+                    newCursorRowIndex = rebuilt.count - 1
+                    newCursorCol = max(0, min(cursorOffset, newCols - 1))
+                }
+                continue
+            }
+
+            var starts: [Int] = []
+            var lengths: [Int] = []
+            var pos = 0
+            repeat {
+                var take = min(newCols, line.used - pos)
+                // A double-width glyph never straddles the edge: if the cut
+                // would land between a head and the trailing half it reserved,
+                // push the whole glyph to the next row.
+                if take == newCols, pos + take < line.used,
+                   line.cells[pos + take].width == 0 {
+                    take -= 1
+                }
+                starts.append(pos)
+                lengths.append(max(0, take))
+                pos += max(take, 1)
+            } while pos < line.used
+
+            for (k, start) in starts.enumerated() {
+                rebuilt.append((cells: Array(line.cells[start ..< start + lengths[k]]),
+                                wrapped: k < starts.count - 1))
+            }
+
+            guard li == cursorLogical else { continue }
+            var placed = false
+            for (k, start) in starts.enumerated() {
+                guard !placed, cursorOffset < start + lengths[k] || k == starts.count - 1 else { continue }
+                newCursorRowIndex = logicalFirstRow[li] + k
+                newCursorCol = max(0, min(cursorOffset - start, newCols - 1))
+                placed = true
+            }
+            if !placed { newCursorRowIndex = logicalFirstRow[li] }
+        }
+
+        // 4. Trailing blank rows are grid padding, not content. Keeping them
+        //    would push real text up into scrollback every time a line
+        //    re-split into more rows than it used to occupy, so the screen
+        //    would creep upward on each narrowing. Cut back to the last row
+        //    carrying something, or the cursor's row if it sits below that.
+        var lastMeaningful = -1
+        for (k, row) in rebuilt.enumerated()
+        where Self.trimmedCount(row.cells, blank: blank) > 0 {
+            lastMeaningful = k
+        }
+        lastMeaningful = max(lastMeaningful, newCursorRowIndex)
+        if lastMeaningful + 1 < rebuilt.count {
+            rebuilt.removeSubrange((lastMeaningful + 1)...)
+        }
+
+        // 5. The tail is the grid; everything above it is history, capped.
+        //    Scrollback rows are stored at whatever width they came out at —
+        //    viewportSnapshot pads short ones — so no row is copied to fit.
+        let total = rebuilt.count
+        let gridStart = max(0, total - newRows)
+        let keep = min(gridStart, maxScrollback)
+        let dropped = gridStart - keep
+
+        scrollbackStore = []
+        scrollbackWrapped = []
+        scrollbackStore.reserveCapacity(keep)
+        scrollbackWrapped.reserveCapacity(keep)
+        for k in dropped..<gridStart {
+            scrollbackStore.append(rebuilt[k].cells)
+            scrollbackWrapped.append(rebuilt[k].wrapped)
+        }
+        scrollbackStart = 0
+        scrollbackCount = keep
+        scrolledRows = gridStart
+
+        var newCells = [Cell](repeating: blank, count: newCols * newRows)
+        var newWrapped = [Bool](repeating: false, count: newRows)
+        for r in 0..<newRows {
+            let k = gridStart + r
+            guard k < total else { break }
+            let row = rebuilt[k].cells
+            let copy = min(newCols, row.count)
+            for c in 0..<copy { newCells[r * newCols + c] = row[c] }
+            newWrapped[r] = rebuilt[k].wrapped
+        }
+
+        // 6. Prompt markers ride their logical line to its new first row.
+        var seen = Set<Int>()
+        prompts = prompts.compactMap { prompt -> Prompt? in
+            guard let li = absoluteToLogical[prompt.absoluteLine] else { return nil }
+            let moved = logicalFirstRow[li]
+            guard moved >= dropped, seen.insert(moved).inserted else { return nil }
+            return Prompt(absoluteLine: moved, exitCode: prompt.exitCode)
+        }
+
+        return (newCells, newWrapped,
+                max(0, min(newCols - 1, newCursorCol)),
+                max(0, min(newRows - 1, newCursorRowIndex - gridStart)))
+    }
+
+    /// Length of `row` ignoring the run of untouched blanks at its end. A cell
+    /// carrying a background color or an attribute is not blank — counting it
+    /// out would lose the paint — so only wholly default cells are trimmed.
+    private static func trimmedCount(_ row: [Cell], blank: Cell) -> Int {
+        var end = row.count
+        while end > 0 {
+            let c = row[end - 1]
+            guard c.scalar == blank.scalar, c.width == blank.width,
+                  c.attrs == blank.attrs, c.fg == blank.fg, c.bg == blank.bg else { break }
+            end -= 1
+        }
+        return end
+    }
+
+    private static func trimmingTrailingBlanks(_ row: [Cell], blank: Cell) -> [Cell] {
+        Array(row[0 ..< trimmedCount(row, blank: blank)])
+    }
 
     private static func resizedGrid(_ src: [Cell],
                                     oldCols: Int, oldRows: Int,
