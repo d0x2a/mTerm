@@ -2,7 +2,7 @@
 
 A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
-> **Status:** v0.6.4 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
+> **Status:** v0.7.0 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
 
 ## Why
 
@@ -34,6 +34,7 @@ swift run -c release mTerm
 
 - AppKit-native window with tabbed sidebar (drag to reorder), full-screen, session restore (tabs + CWDs). The sidebar and split divider tint to the active theme.
 - Metal-rendered terminal view with pixel-snapped glyph atlas — crisp text at all sizes, no GPU filtering blur.
+- Resizing reflows the buffer: wrapped lines rejoin and re-split at the new width rather than being cut off, and the grid size shows in a readout while you drag.
 - xterm-256color compatibility for vim/neovim/htop/fzf/less/git pagers. 24-bit true color, alt-screen, scroll regions (DECSTBM), DEC line drawing, and synchronized output (DEC 2026) so multi-line redraws land in one frame.
 - Mouse reporting: SGR (1006) and legacy encodings for click, drag, motion, and wheel — hold ⇧ to select instead. Bracketed paste, focus events, and device/cursor-position reports.
 - East Asian and fullwidth characters take their proper two columns, and combining marks compose into the glyph they follow, so CJK text stays in step with the shell's own cursor arithmetic.
