@@ -2,7 +2,7 @@
 
 A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
-> **Status:** v0.6.3 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
+> **Status:** v0.6.4 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
 
 ## Why
 
