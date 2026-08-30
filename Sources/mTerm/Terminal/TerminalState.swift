@@ -146,7 +146,15 @@ final class TerminalState: ParserSink {
 
     // Scrollback only retains rows evicted from the PRIMARY screen. Alt-screen
     // scrolls (vim, etc.) are discarded — that matches xterm/iTerm behavior.
-    private var scrollback: [[Cell]] = []
+    /// Scrollback as a ring. Storage grows to `maxScrollback` rows and then
+    /// stops: the oldest row's buffer is recycled to carry the newest, so a
+    /// scrolled line costs no allocation in the steady state, and evicting is
+    /// an index bump rather than shifting every surviving row down by one.
+    /// Rows keep whatever width they had when they were pushed — resize does
+    /// not reflow history — so this can't be one flat buffer.
+    private var scrollbackStore: [[Cell]] = []
+    private var scrollbackStart = 0      // ring slot holding the oldest row
+    private var scrollbackCount = 0
     private let maxScrollback: Int = 10_000
 
     // Absolute line numbering — every row ever pushed into scrollback bumps this
@@ -294,6 +302,19 @@ final class TerminalState: ParserSink {
         return (physical >= rows ? physical - rows : physical) * cols
     }
 
+    /// Ring slot holding scrollback row `i`, counting from the oldest.
+    @inline(__always)
+    private func scrollbackSlot(_ i: Int) -> Int {
+        let idx = scrollbackStart + i
+        return idx < scrollbackStore.count ? idx : idx - scrollbackStore.count
+    }
+
+    /// Scrollback row `i`, oldest first.
+    @inline(__always)
+    private func scrollbackRow(_ i: Int) -> [Cell] {
+        scrollbackStore[scrollbackSlot(i)]
+    }
+
     /// Logical row `row` as a standalone array.
     @inline(__always)
     private func gridRow(_ row: Int) -> [Cell] {
@@ -327,7 +348,7 @@ final class TerminalState: ParserSink {
     /// Composes a `rows`-tall viewport. With scrollOffset=0 the viewport is the
     /// active grid. With scrollOffset>0 the top N rows come from scrollback.
     func viewportSnapshot(scrollOffset requested: Int) -> TerminalSnapshot {
-        let offset = max(0, min(requested, scrollback.count))
+        let offset = max(0, min(requested, scrollbackCount))
         if offset == 0 {
             return TerminalSnapshot(
                 cols: cols, rows: rows,
@@ -335,7 +356,7 @@ final class TerminalState: ParserSink {
                 rowOffset: rowOffset,
                 cursorCol: cursorCol, cursorRow: cursorRow,
                 cursorVisible: cursorVisible,
-                scrollbackLines: scrollback.count,
+                scrollbackLines: scrollbackCount,
                 scrollOffset: 0,
                 title: title,
                 prompts: visiblePrompts(offset: 0),
@@ -351,13 +372,13 @@ final class TerminalState: ParserSink {
         // Scrollback rows: the offset most-recent rows are pushed UP off-screen,
         // so the rows we want are scrollback[count-offset ..< count] at the top
         // of the viewport.
-        let firstScrollbackIdx = scrollback.count - offset
+        let firstScrollbackIdx = scrollbackCount - offset
         let scrollbackRowsShown = min(offset, rows)
         // Scrollback rows can be shorter than the current width; pad with one
         // blank rather than constructing a themed Cell per missing column.
         let padding = Cell()
         for i in 0..<scrollbackRowsShown {
-            let row = scrollback[firstScrollbackIdx + i]
+            let row = scrollbackRow(firstScrollbackIdx + i)
             for c in 0..<cols {
                 viewport.append(c < row.count ? row[c] : padding)
             }
@@ -378,7 +399,7 @@ final class TerminalState: ParserSink {
             rowOffset: 0,          // composed in logical order already
             cursorCol: cursorCol, cursorRow: cursorRow,
             cursorVisible: false,
-            scrollbackLines: scrollback.count,
+            scrollbackLines: scrollbackCount,
             scrollOffset: offset,
             title: title,
             prompts: visiblePrompts(offset: offset),
@@ -830,10 +851,11 @@ final class TerminalState: ParserSink {
             if let nfg = colorMap[cells[i].fg] { cells[i].fg = nfg }
             if let nbg = colorMap[cells[i].bg] { cells[i].bg = nbg }
         }
-        for r in 0..<scrollback.count {
-            for c in 0..<scrollback[r].count {
-                if let nfg = colorMap[scrollback[r][c].fg] { scrollback[r][c].fg = nfg }
-                if let nbg = colorMap[scrollback[r][c].bg] { scrollback[r][c].bg = nbg }
+        for r in 0..<scrollbackCount {
+            let slot = scrollbackSlot(r)
+            for c in 0..<scrollbackStore[slot].count {
+                if let nfg = colorMap[scrollbackStore[slot][c].fg] { scrollbackStore[slot][c].fg = nfg }
+                if let nbg = colorMap[scrollbackStore[slot][c].bg] { scrollbackStore[slot][c].bg = nbg }
             }
         }
         for i in 0..<stashedCells.count {
@@ -859,9 +881,9 @@ final class TerminalState: ParserSink {
     /// unused grid below the cursor) are dropped. Used by "Copy All".
     func bufferText() -> String {
         var lines: [String] = []
-        lines.reserveCapacity(scrollback.count + rows)
-        for row in scrollback {
-            lines.append(Self.rowText(row))
+        lines.reserveCapacity(scrollbackCount + rows)
+        for i in 0..<scrollbackCount {
+            lines.append(Self.rowText(scrollbackRow(i)))
         }
         for r in 0..<rows {
             lines.append(Self.rowText(gridRow(r)))
@@ -872,13 +894,13 @@ final class TerminalState: ParserSink {
 
     /// The row at an absolute line number — the same coordinate space as
     /// Prompt.absoluteLine and SearchMatch.absoluteLine. Scrollback holds
-    /// [scrolledRows - scrollback.count, scrolledRows); the active grid picks
+    /// [scrolledRows - scrollbackCount, scrolledRows); the active grid picks
     /// up from there. Returns nil for lines that have been trimmed off the top
     /// of history or sit past the bottom of the grid.
     private func row(atAbsolute line: Int) -> [Cell]? {
-        let topOfHistory = scrolledRows - scrollback.count
+        let topOfHistory = scrolledRows - scrollbackCount
         if line < topOfHistory { return nil }
-        if line < scrolledRows { return scrollback[line - topOfHistory] }
+        if line < scrolledRows { return scrollbackRow(line - topOfHistory) }
         let r = line - scrolledRows
         guard r >= 0, r < rows else { return nil }
         return gridRow(r)
@@ -890,7 +912,7 @@ final class TerminalState: ParserSink {
     /// at real content keeps Select All from dragging the empty rows below the
     /// prompt in as a run of trailing newlines.
     func contentBounds() -> (firstLine: Int, lastLine: Int, lastCol: Int)? {
-        let firstLine = scrolledRows - scrollback.count
+        let firstLine = scrolledRows - scrollbackCount
         let lastPossible = scrolledRows + rows - 1
         var line = lastPossible
         while line >= firstLine {
@@ -957,9 +979,9 @@ final class TerminalState: ParserSink {
         }
 
         var matches: [SearchMatch] = []
-        let topOfHistory = scrolledRows - scrollback.count
-        for (i, row) in scrollback.enumerated() {
-            scanRow(row, absLine: topOfHistory + i,
+        let topOfHistory = scrolledRows - scrollbackCount
+        for i in 0..<scrollbackCount {
+            scanRow(scrollbackRow(i), absLine: topOfHistory + i,
                     query: query, pattern: pattern,
                     caseSensitive: caseSensitive, into: &matches)
         }
@@ -1384,16 +1406,10 @@ final class TerminalState: ParserSink {
     }
 
     private func pushToScrollback(_ lines: Int) {
-        for r in 0..<lines {
-            let row = gridRow(r)
-            scrollback.append(row)
-        }
-        if scrollback.count > maxScrollback {
-            scrollback.removeFirst(scrollback.count - maxScrollback)
-        }
+        for r in 0..<lines { pushScrollbackRow(r) }
         scrolledRows += lines
         // Drop prompts that have fallen out of scrollback.
-        let topOfHistory = scrolledRows - scrollback.count
+        let topOfHistory = scrolledRows - scrollbackCount
         if let firstKeep = prompts.firstIndex(where: { $0.absoluteLine >= topOfHistory }),
            firstKeep > 0 {
             prompts.removeFirst(firstKeep)
@@ -1401,6 +1417,32 @@ final class TerminalState: ParserSink {
                   prompts.last!.absoluteLine < topOfHistory {
             prompts.removeAll()
         }
+    }
+
+    /// Moves one grid row into scrollback, recycling the oldest row's storage
+    /// once the ring is full.
+    private func pushScrollbackRow(_ row: Int) {
+        guard maxScrollback > 0 else { return }
+        let base = rowBase(row)
+        if scrollbackCount < maxScrollback {
+            scrollbackStore.append(gridRow(row))
+            scrollbackCount += 1
+            return
+        }
+        // Full: the oldest slot becomes the newest. Dropping the store's own
+        // reference first is what leaves `recycled` uniquely referenced, so the
+        // append reuses its buffer rather than allocating. If a caller is still
+        // holding that row the copy-on-write simply happens as it always did.
+        let slot = scrollbackStart
+        var recycled = scrollbackStore[slot]
+        scrollbackStore[slot] = []
+        recycled.removeAll(keepingCapacity: true)
+        cells.withUnsafeBufferPointer { src in
+            recycled.append(contentsOf: UnsafeBufferPointer(start: src.baseAddress! + base,
+                                                            count: cols))
+        }
+        scrollbackStore[slot] = recycled
+        scrollbackStart = slot + 1 == scrollbackStore.count ? 0 : slot + 1
     }
 
     /// DECSTBM. Margins arrive 1-based and inclusive; a region shorter than two
