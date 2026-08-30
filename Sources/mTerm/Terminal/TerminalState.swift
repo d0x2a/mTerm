@@ -54,6 +54,11 @@ struct TerminalSnapshot {
     let cols: Int
     let rows: Int
     let cells: [Cell]
+    /// The active grid is a ring of rows — scrolling rotates an offset rather
+    /// than moving every cell — so a viewport row is not necessarily the same
+    /// row of `cells`. Always 0 for a scrolled-back viewport, which is composed
+    /// in logical order. Use `rowStart(_:)` rather than reading this directly.
+    let rowOffset: Int
     let cursorCol: Int
     let cursorRow: Int
     let cursorVisible: Bool
@@ -64,6 +69,14 @@ struct TerminalSnapshot {
     let scrolledRows: Int          // total lines ever pushed to scrollback (for absolute coords)
     let currentDirectory: String?  // last OSC 7 reported cwd
     let usingAlt: Bool             // alt buffer is showing (vim, less, ...)
+
+    /// Index in `cells` where viewport row `row` begins.
+    @inline(__always)
+    func rowStart(_ row: Int) -> Int {
+        if rowOffset == 0 { return row * cols }
+        let physical = row + rowOffset
+        return (physical >= rows ? physical - rows : physical) * cols
+    }
 }
 
 /// A regex/substring match somewhere in scrollback or the active grid. Both
@@ -126,6 +139,10 @@ final class TerminalState: ParserSink {
     private(set) var cols: Int
     private(set) var rows: Int
     private var cells: [Cell]
+    /// Physical row of logical row 0. Scrolling the whole grid rotates this
+    /// instead of moving every cell, which is what makes a line of output
+    /// O(cols) rather than O(rows × cols). Kept in [0, rows).
+    private var rowOffset = 0
 
     // Scrollback only retains rows evicted from the PRIMARY screen. Alt-screen
     // scrolls (vim, etc.) are discarded — that matches xterm/iTerm behavior.
@@ -246,6 +263,8 @@ final class TerminalState: ParserSink {
         let newRows = max(1, requestedRows)
         if newCols == cols && newRows == rows { return }
 
+        // resizedGrid reads the buffer in logical row order.
+        normalizeRowOffset()
         cells = Self.resizedGrid(cells, oldCols: cols, oldRows: rows,
                                  newCols: newCols, newRows: newRows)
         if !stashedCells.isEmpty {
@@ -267,6 +286,40 @@ final class TerminalState: ParserSink {
         tabStops = Self.defaultTabStops(cols: cols)
     }
 
+    /// Index in `cells` where logical row `row` begins.
+    @inline(__always)
+    private func rowBase(_ row: Int) -> Int {
+        if rowOffset == 0 { return row * cols }
+        let physical = row + rowOffset
+        return (physical >= rows ? physical - rows : physical) * cols
+    }
+
+    /// Logical row `row` as a standalone array.
+    @inline(__always)
+    private func gridRow(_ row: Int) -> [Cell] {
+        let base = rowBase(row)
+        return Array(cells[base ..< base + cols])
+    }
+
+    /// Rewrites the ring so logical row 0 sits at physical row 0. Used by the
+    /// paths that reinterpret the whole buffer (resize) rather than making each
+    /// of them ring-aware.
+    private func normalizeRowOffset() {
+        guard rowOffset != 0 else { return }
+        var rebuilt = [Cell](repeating: Cell(), count: cells.count)
+        rebuilt.withUnsafeMutableBufferPointer { dst in
+            cells.withUnsafeBufferPointer { src in
+                for r in 0..<rows {
+                    memcpy(dst.baseAddress! + r * cols,
+                           src.baseAddress! + rowBase(r),
+                           cols * MemoryLayout<Cell>.stride)
+                }
+            }
+        }
+        cells = rebuilt
+        rowOffset = 0
+    }
+
     func snapshot() -> TerminalSnapshot {
         viewportSnapshot(scrollOffset: 0)
     }
@@ -279,6 +332,7 @@ final class TerminalState: ParserSink {
             return TerminalSnapshot(
                 cols: cols, rows: rows,
                 cells: cells,
+                rowOffset: rowOffset,
                 cursorCol: cursorCol, cursorRow: cursorRow,
                 cursorVisible: cursorVisible,
                 scrollbackLines: scrollback.count,
@@ -313,7 +367,7 @@ final class TerminalState: ParserSink {
         let gridRowsShown = rows - scrollbackRowsShown
         for r in 0..<gridRowsShown {
             for c in 0..<cols {
-                viewport.append(cells[r * cols + c])
+                viewport.append(cells[rowBase(r) + c])
             }
         }
 
@@ -321,6 +375,7 @@ final class TerminalState: ParserSink {
         return TerminalSnapshot(
             cols: cols, rows: rows,
             cells: viewport,
+            rowOffset: 0,          // composed in logical order already
             cursorCol: cursorCol, cursorRow: cursorRow,
             cursorVisible: false,
             scrollbackLines: scrollback.count,
@@ -377,7 +432,7 @@ final class TerminalState: ParserSink {
         // next row whole, leaving the last column blank.
         if width == 2 && cursorCol == cols - 1 {
             guard autoWrap else { return }
-            cells[cursorRow * cols + cursorCol] = Cell()
+            cells[rowBase(cursorRow) + cursorCol] = Cell()
             cursorCol = 0
             advanceRow()
         }
@@ -395,14 +450,14 @@ final class TerminalState: ParserSink {
             attrs: currentAttrs,
             width: UInt8(width)
         )
-        cells[cursorRow * cols + cursorCol] = cell
+        cells[rowBase(cursorRow) + cursorCol] = cell
         if width == 2 {
             // The trailing half keeps the head's colors so selection and
             // inverse video paint across the whole glyph.
             var tail = cell
             tail.scalar = " "
             tail.width = 0
-            cells[cursorRow * cols + cursorCol + 1] = tail
+            cells[rowBase(cursorRow) + cursorCol + 1] = tail
         }
         cursorCol += width
     }
@@ -411,7 +466,7 @@ final class TerminalState: ParserSink {
     /// so no fragment of the old glyph is left behind.
     private func clearOrphan(at col: Int) {
         guard col >= 0, col < cols else { return }
-        let idx = cursorRow * cols + col
+        let idx = rowBase(cursorRow) + col
         switch cells[idx].width {
         case 0:                                     // trailing half: head is left
             if col > 0 { cells[idx - 1] = Cell() }
@@ -429,8 +484,8 @@ final class TerminalState: ParserSink {
     private func attachMark(_ mark: Unicode.Scalar) {
         var col = min(cursorCol, cols) - 1
         guard col >= 0 else { return }
-        if cells[cursorRow * cols + col].isContinuation, col > 0 { col -= 1 }
-        let idx = cursorRow * cols + col
+        if cells[rowBase(cursorRow) + col].isContinuation, col > 0 { col -= 1 }
+        let idx = rowBase(cursorRow) + col
         let composed = (String(cells[idx].scalar) + String(mark))
             .precomposedStringWithCanonicalMapping
             .unicodeScalars
@@ -809,7 +864,7 @@ final class TerminalState: ParserSink {
             lines.append(Self.rowText(row))
         }
         for r in 0..<rows {
-            lines.append(Self.rowText(Array(cells[r * cols ..< (r + 1) * cols])))
+            lines.append(Self.rowText(gridRow(r)))
         }
         while let last = lines.last, last.isEmpty { lines.removeLast() }
         return lines.joined(separator: "\n")
@@ -826,7 +881,7 @@ final class TerminalState: ParserSink {
         if line < scrolledRows { return scrollback[line - topOfHistory] }
         let r = line - scrolledRows
         guard r >= 0, r < rows else { return nil }
-        return Array(cells[r * cols ..< (r + 1) * cols])
+        return gridRow(r)
     }
 
     /// The span of the buffer that actually holds something, in absolute lines:
@@ -909,7 +964,7 @@ final class TerminalState: ParserSink {
                     caseSensitive: caseSensitive, into: &matches)
         }
         for r in 0..<rows {
-            let row = Array(cells[r * cols ..< (r + 1) * cols])
+            let row = gridRow(r)
             scanRow(row, absLine: scrolledRows + r,
                     query: query, pattern: pattern,
                     caseSensitive: caseSensitive, into: &matches)
@@ -1094,12 +1149,17 @@ final class TerminalState: ParserSink {
 
     private func enterAltScreen(clear: Bool) {
         if usingAlt { return }
+        // Stash the primary grid in logical order. A ring offset kept beside
+        // it would have to survive a resize, which reflows stashedCells and
+        // would leave the offset describing the old geometry.
+        normalizeRowOffset()
         stashedCells = cells
         stashedCursor = (cursorCol, cursorRow)
         stashedFg = currentFg
         stashedBg = currentBg
         stashedAttrs = currentAttrs
         cells = Array(repeating: Cell(), count: cols * rows)
+        rowOffset = 0
         cursorCol = 0
         cursorRow = 0
         let theme = ThemeStore.currentTheme
@@ -1114,6 +1174,7 @@ final class TerminalState: ParserSink {
     private func exitAltScreen() {
         if !usingAlt { return }
         cells = stashedCells
+        rowOffset = 0          // stashed already normalized, see enterAltScreen
         stashedCells = []
         cursorCol = min(stashedCursor.col, cols - 1)
         cursorRow = min(stashedCursor.row, rows - 1)
@@ -1127,6 +1188,7 @@ final class TerminalState: ParserSink {
 
     private func fullReset() {
         cells = Array(repeating: Cell(), count: cols * rows)
+        rowOffset = 0
         cursorCol = 0
         cursorRow = 0
         let theme = ThemeStore.currentTheme
@@ -1276,12 +1338,26 @@ final class TerminalState: ParserSink {
         if toScrollback && !usingAlt && top == 0 && bottom == rows - 1 {
             pushToScrollback(lines)
         }
+        if top == 0 && bottom == rows - 1 {
+            // Whole-grid scroll: the ordinary case, and the only shape the ring
+            // can express. Every row moves at once by rotating the offset, so a
+            // line of output costs one blanked row instead of a copy of the
+            // entire grid.
+            rowOffset += lines
+            if rowOffset >= rows { rowOffset -= rows }
+            for r in (rows - lines)..<rows { blankCells(from: rowBase(r), count: cols) }
+            return
+        }
+        // A margin-bounded region can't rotate — that would drag the rows
+        // outside the margins along with it — so those move a row at a time.
+        // Rows are no longer adjacent in ring order, hence the per-row move.
         let shiftEnd = bottom - lines
         if shiftEnd >= top {
-            moveCells(from: (top + lines) * cols, to: top * cols,
-                      count: (shiftEnd - top + 1) * cols)
+            for r in top...shiftEnd {
+                moveCells(from: rowBase(r + lines), to: rowBase(r), count: cols)
+            }
         }
-        blankCells(from: (bottom - lines + 1) * cols, count: lines * cols)
+        for r in (bottom - lines + 1)...bottom { blankCells(from: rowBase(r), count: cols) }
     }
 
     /// Moves rows [top, bottom] down by `n`, blanking what opens up at the top
@@ -1291,17 +1367,25 @@ final class TerminalState: ParserSink {
         let lines = min(n, bottom - top + 1)
         guard lines > 0 else { return }
 
+        if top == 0 && bottom == rows - 1 {
+            rowOffset -= lines
+            if rowOffset < 0 { rowOffset += rows }   // lines <= rows, so one wrap
+            for r in 0..<lines { blankCells(from: rowBase(r), count: cols) }
+            return
+        }
         let shiftStart = top + lines
         if shiftStart <= bottom {
-            moveCells(from: top * cols, to: shiftStart * cols,
-                      count: (bottom - shiftStart + 1) * cols)
+            // Descending, so a row is never overwritten before it is read.
+            for r in stride(from: bottom, through: shiftStart, by: -1) {
+                moveCells(from: rowBase(r - lines), to: rowBase(r), count: cols)
+            }
         }
-        blankCells(from: top * cols, count: lines * cols)
+        for r in top...(top + lines - 1) { blankCells(from: rowBase(r), count: cols) }
     }
 
     private func pushToScrollback(_ lines: Int) {
         for r in 0..<lines {
-            let row = Array(cells[r * cols ..< (r + 1) * cols])
+            let row = gridRow(r)
             scrollback.append(row)
         }
         if scrollback.count > maxScrollback {
@@ -1337,13 +1421,14 @@ final class TerminalState: ParserSink {
         switch mode {
         case 0:
             eraseLine(mode: 0)
-            blankCells(from: (cursorRow + 1) * cols,
-                       count: (rows - cursorRow - 1) * cols)
+            if cursorRow + 1 < rows {
+                for r in (cursorRow + 1)..<rows { blankCells(from: rowBase(r), count: cols) }
+            }
         case 1:
-            blankCells(from: 0, count: cursorRow * cols)
-            blankCells(from: cursorRow * cols,
-                       count: min(cursorCol, cols - 1) + 1)
+            for r in 0..<cursorRow { blankCells(from: rowBase(r), count: cols) }
+            blankCells(from: rowBase(cursorRow), count: min(cursorCol, cols - 1) + 1)
         case 2, 3:
+            // Every row is cleared, so ring order doesn't matter here.
             blankCells(from: 0, count: cells.count)
         default:
             break
@@ -1355,7 +1440,7 @@ final class TerminalState: ParserSink {
     private func deleteChars(_ count: Int) {
         let n = min(count, cols - cursorCol)
         guard n > 0 else { return }
-        let base = cursorRow * cols
+        let base = rowBase(cursorRow)
         moveCells(from: base + cursorCol + n, to: base + cursorCol,
                   count: cols - cursorCol - n)
         blankCells(from: base + cols - n, count: n)
@@ -1367,7 +1452,7 @@ final class TerminalState: ParserSink {
         let col = min(cursorCol, cols - 1)
         let n = min(count, cols - col)
         guard n > 0 else { return }
-        let base = cursorRow * cols
+        let base = rowBase(cursorRow)
         moveCells(from: base + col, to: base + col + n, count: cols - col - n)
         blankCells(from: base + col, count: n)
     }
@@ -1377,7 +1462,7 @@ final class TerminalState: ParserSink {
         let col = min(cursorCol, cols - 1)
         let n = min(count, cols - col)
         guard n > 0 else { return }
-        blankCells(from: cursorRow * cols + col, count: n)
+        blankCells(from: rowBase(cursorRow) + col, count: n)
     }
 
     /// IL / DL. Both are no-ops outside the scrolling region, and both scroll
@@ -1397,11 +1482,11 @@ final class TerminalState: ParserSink {
     private func eraseLine(mode: Int) {
         switch mode {
         case 0:
-            blankCells(from: cursorRow * cols + cursorCol, count: cols - cursorCol)
+            blankCells(from: rowBase(cursorRow) + cursorCol, count: cols - cursorCol)
         case 1:
-            blankCells(from: cursorRow * cols, count: min(cursorCol, cols - 1) + 1)
+            blankCells(from: rowBase(cursorRow), count: min(cursorCol, cols - 1) + 1)
         case 2:
-            blankCells(from: cursorRow * cols, count: cols)
+            blankCells(from: rowBase(cursorRow), count: cols)
         default:
             break
         }

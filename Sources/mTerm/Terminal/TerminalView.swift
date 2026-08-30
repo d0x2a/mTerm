@@ -367,7 +367,7 @@ final class TerminalView: NSView, CALayerDelegate {
         guard coord.row >= 0, coord.row < snapshot.rows, cols > 0 else { return single }
 
         func isWord(_ col: Int) -> Bool {
-            isWordChar(snapshot.cells[coord.row * cols + col].scalar)
+            isWordChar(snapshot.cells[snapshot.rowStart(coord.row) + col].scalar)
         }
 
         let clicked = min(coord.col, cols - 1)
@@ -1022,7 +1022,7 @@ final class TerminalView: NSView, CALayerDelegate {
     private func renderFrame() {
         guard let metalLayer = layer as? CAMetalLayer, let renderer else { return }
         let snapshot = session?.snapshot(scrollOffset: scrollOffset)
-            ?? TerminalSnapshot(cols: 1, rows: 1, cells: [Cell()],
+            ?? TerminalSnapshot(cols: 1, rows: 1, cells: [Cell()], rowOffset: 0,
                                 cursorCol: 0, cursorRow: 0, cursorVisible: false,
                                 scrollbackLines: 0, scrollOffset: 0, title: "",
                                 prompts: [], scrolledRows: 0, currentDirectory: nil,

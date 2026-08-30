@@ -42,8 +42,9 @@ final class TriggerEvaluator {
 
         for row in 0..<snapshot.rows {
             line.removeAll(keepingCapacity: true)
+            let rowStart = snapshot.rowStart(row)
             for col in 0..<snapshot.cols {
-                let cell = snapshot.cells[row * snapshot.cols + col]
+                let cell = snapshot.cells[rowStart + col]
                 if cell.scalar.value <= 0xFFFF {
                     line.unicodeScalars.append(cell.scalar)
                 } else {

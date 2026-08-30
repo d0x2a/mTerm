@@ -309,7 +309,7 @@ final class Renderer {
                     selectionEnd = row == selection.endRow ? selection.endCol : cols - 1
                 }
                 let cursorOnThisRow = snapshot.cursorVisible && row == snapshot.cursorRow
-                let rowBase = row * cols
+                let rowBase = snapshot.rowStart(row)
                 for col in 0..<cols {
                     let cell = cells[rowBase + col]
                     let isCursor = cursorOnThisRow && col == snapshot.cursorCol
