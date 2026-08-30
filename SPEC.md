@@ -217,7 +217,7 @@ Sensible Mac defaults out of the box. All overridable.
 | Scrollback memory | ≤ 200MB for 10k-line buffer with 200-col width |
 | Idle CPU | < 0.1% with one open tab |
 
-Performance is tracked via a built-in `--bench` mode that runs canonical workloads and emits numbers, plus a CI job that fails on regression.
+These are targets, not measurements. There is no benchmark harness and no perf CI yet — the numbers above are the bar to clear, not results. Individual changes have been measured ad hoc where it mattered; see the release notes.
 
 ## v1 Definition of Done ("Daily-driver minimum")
 
