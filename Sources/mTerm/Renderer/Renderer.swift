@@ -73,18 +73,17 @@ struct GridLayout {
         return (cols, rows)
     }
 
-    /// Top-left pixel of the cell grid. The grid is centered horizontally in
-    /// the viewport (so any sub-cell remainder is split between left and right
-    /// padding instead of always piling up on the right) and top-aligned
-    /// vertically (terminals fill from the top down).
-    func origin(cols: Int, viewportPixels: SIMD2<Float>) -> SIMD2<Float> {
-        let gridW = Float(cols) * cellWidth
-        // Floor so the grid lands on a pixel boundary (otherwise the /2
-        // can produce a half-pixel x when viewport-gridW is odd, which
-        // re-introduces sub-pixel sampling that nearest-filter can't hide).
-        let x = max(margin, floor((viewportPixels.x - gridW) / 2))
-        return SIMD2<Float>(x, margin)
-    }
+    /// Top-left pixel of the cell grid: pinned to the left margin, and
+    /// top-aligned because terminals fill from the top down.
+    ///
+    /// This used to centre the grid horizontally so a sub-cell remainder was
+    /// split between both sides rather than piling up on the right. That makes
+    /// the text slide left and right by up to half a cell during a live resize,
+    /// as the remainder grows and collapses across each column boundary.
+    /// Pinning left keeps every glyph still and puts the whole remainder in the
+    /// right padding. `margin` is 8pt in device pixels, so this is already on a
+    /// pixel boundary — nothing to round.
+    var origin: SIMD2<Float> { SIMD2<Float>(margin, margin) }
 }
 
 final class Renderer {
@@ -228,8 +227,7 @@ final class Renderer {
                                 selection: Selection?,
                                 highlights: [HighlightBand],
                                 focused: Bool,
-                                cursorOn: Bool,
-                                viewportPixels: SIMD2<Float>) {
+                                cursorOn: Bool) {
         flatScratch.removeAll(keepingCapacity: true)
         glyphScratch.removeAll(keepingCapacity: true)
         glyphScratch.reserveCapacity(snapshot.cells.count / 2)
@@ -237,7 +235,7 @@ final class Renderer {
         let cellWidth = layout.cellWidth
         let cellHeight = layout.cellHeight
         let ascent = layout.ascent
-        let origin = layout.origin(cols: snapshot.cols, viewportPixels: viewportPixels)
+        let origin = layout.origin
 
         let theme = ThemeStore.currentTheme
         let cursorColor = theme.cursor
@@ -387,13 +385,11 @@ final class Renderer {
         guard let drawable = layer.nextDrawable() else { return }
         let drawableSize = layer.drawableSize
 
-        let viewportPx = SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
         buildInstances(from: snapshot,
                        selection: selection,
                        highlights: highlights,
                        focused: focused,
-                       cursorOn: cursorOn,
-                       viewportPixels: viewportPx)
+                       cursorOn: cursorOn)
 
         growBuffer(&flatBuffer, capacity: &flatCapacity, count: flatScratch.count, type: FlatInstance.self)
         growBuffer(&glyphBuffer, capacity: &glyphCapacity, count: glyphScratch.count, type: CellInstance.self)

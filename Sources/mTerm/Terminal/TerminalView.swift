@@ -575,12 +575,7 @@ final class TerminalView: NSView, CALayerDelegate {
         let cellWPts = CGFloat(renderer.layout.cellWidth) / scale
         let cellHPts = CGFloat(renderer.layout.cellHeight) / scale
         guard cellWPts > 0, cellHPts > 0 else { return (0, 0) }
-        let viewportPx = SIMD2<Float>(
-            Float(bounds.size.width * scale),
-            Float(bounds.size.height * scale)
-        )
-        let originPx = renderer.layout.origin(cols: lastSnapshotCols,
-                                              viewportPixels: viewportPx)
+        let originPx = renderer.layout.origin
         let originXPts = CGFloat(originPx.x) / scale
         let originYPts = CGFloat(originPx.y) / scale
         let col = Int(floor((point.x - originXPts) / cellWPts))
