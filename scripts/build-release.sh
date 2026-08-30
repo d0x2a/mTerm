@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Builds a signed + notarized + stapled mTerm.app and mTerm-<version>.dmg
-# under ./build/.
+# under ./build/. The binary is always universal (arm64 + x86_64).
 #
 # Optional env vars
 # -----------------
 #   BUNDLE_ID    Defaults to com.d0x2a.mTerm.
 #   VERSION      Defaults to current version. Goes into both
 #                CFBundleShortVersionString and CFBundleVersion.
-#   UNIVERSAL    If set to 1, builds a universal arm64+x86_64 binary.
-#                Default: current host arch only.
 
 set -euo pipefail
 
@@ -16,7 +14,6 @@ DEVELOPER_ID_APPLICATION="${DEVELOPER_ID_APPLICATION:-Developer ID Application: 
 NOTARY_PROFILE="${NOTARY_PROFILE:-mterm-notary}"
 BUNDLE_ID="${BUNDLE_ID:-com.d0x2a.mTerm}"
 VERSION="${VERSION:-0.6.4}"
-UNIVERSAL="${UNIVERSAL:-0}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build"
@@ -29,26 +26,25 @@ echo "▶ cleaning $BUILD"
 rm -rf "$BUILD"
 mkdir -p "$BUILD" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-echo "▶ building release binary"
+echo "▶ building release binary (universal arm64 + x86_64)"
+# Always both arches: an arm64-only build fails to launch on Intel Macs, and
+# 0.6.4 shipped that way once already because the universal build was opt-in.
+#
 # The arch flags have to be on --show-bin-path too: a universal build lands in
 # .build/apple/Products/Release, and asking without them hands back the
-# host-arch path instead — which is how UNIVERSAL=1 used to ship arm64-only.
-BUILD_FLAGS=(-c release)
-if [[ "$UNIVERSAL" == "1" ]]; then
-    BUILD_FLAGS+=(--arch arm64 --arch x86_64)
-fi
+# host-arch path instead — which is how a two-arch build still shipped
+# arm64-only. The lipo check below is what catches that, so keep it.
+BUILD_FLAGS=(-c release --arch arm64 --arch x86_64)
 swift build "${BUILD_FLAGS[@]}"
 BIN_DIR="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)"
 cp "$BIN_DIR/mTerm" "$APP/Contents/MacOS/mTerm"
 
-if [[ "$UNIVERSAL" == "1" ]]; then
-    ARCHS="$(lipo -archs "$APP/Contents/MacOS/mTerm")"
-    [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]] || {
-        echo "✗ expected a universal binary, got: $ARCHS" >&2
-        exit 1
-    }
-    echo "  universal binary: $ARCHS"
-fi
+ARCHS="$(lipo -archs "$APP/Contents/MacOS/mTerm")"
+[[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]] || {
+    echo "✗ expected a universal binary, got: $ARCHS" >&2
+    exit 1
+}
+echo "  universal binary: $ARCHS"
 
 echo "▶ writing Info.plist (bundle=$BUNDLE_ID, version=$VERSION)"
 sed -e "s|__BUNDLE_ID__|$BUNDLE_ID|g" \
