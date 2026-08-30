@@ -23,20 +23,6 @@ private struct CellInstance {
     var flags: UInt32
 }
 
-/// Float RGBA in [0,1] → RGBA8 with red in the low byte.
-@inline(__always)
-private func packColor(_ c: SIMD4<Float>) -> UInt32 {
-    let lo = SIMD4<Float>(repeating: 0)
-    let hi = SIMD4<Float>(repeating: 255)
-    let v: SIMD4<Float> = (c * 255).rounded(.toNearestOrAwayFromZero)
-        .clamped(lowerBound: lo, upperBound: hi)
-    let r = UInt32(v.x)
-    let g = UInt32(v.y)
-    let b = UInt32(v.z)
-    let a = UInt32(v.w)
-    return r | (g << 8) | (b << 16) | (a << 24)
-}
-
 private struct FlatInstance {
     var pos: SIMD2<Float>
     var size: SIMD2<Float>
@@ -255,7 +241,7 @@ final class Renderer {
 
         let theme = ThemeStore.currentTheme
         let cursorColor = theme.cursor
-        let defaultBg = theme.background
+        let defaultBg = PackedColor(theme.background)
         let selectionColor = theme.selection
         // Highlight bands (search matches, trigger highlights) — drawn before
         // selection/cursor so those overlay on top.
@@ -322,7 +308,8 @@ final class Renderer {
 
                     // Per-cell flat instances, painted bottom-up: bg → selection → cursor.
                     if cell.bg != defaultBg {
-                        flatScratch.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: cell.bg))
+                        flatScratch.append(FlatInstance(pos: cellRect.pos, size: cellRect.size,
+                                                        color: cell.bg.simd))
                     }
                     if isSelected {
                         flatScratch.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: selectionColor))
@@ -349,8 +336,9 @@ final class Renderer {
                     var glyphFg = invertGlyph ? cell.bg : cell.fg
                     // Faint (SGR 2): blend the foreground toward the background,
                     // matching how iTerm2 renders dimmed text (e.g. ghost text).
+                    // The one place a cell colour still needs float maths.
                     if cell.attrs.contains(.faint) {
-                        glyphFg = mix(glyphFg, cell.bg, t: 0.5)
+                        glyphFg = PackedColor(mix(glyphFg.simd, cell.bg.simd, t: 0.5))
                     }
                     glyphScratch.append(CellInstance(
                         glyphPos: glyphPos,
@@ -358,7 +346,7 @@ final class Renderer {
                                                 UInt16(entry.atlasOrigin.y)),
                         atlasSize: SIMD2<UInt16>(UInt16(entry.atlasSize.x),
                                                  UInt16(entry.atlasSize.y)),
-                        fgColor: packColor(glyphFg),
+                        fgColor: glyphFg.value,
                         flags: entry.isColor ? 1 : 0
                     ))
                 }

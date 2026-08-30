@@ -5,6 +5,38 @@ enum ThemeAppearance: String, Codable, CaseIterable {
     case light, dark
 }
 
+/// A cell colour, 8 bits per channel with red in the low byte — the layout
+/// Metal's `unpack_unorm4x8_to_float` expects, so a cell's colour reaches the
+/// GPU without conversion.
+///
+/// Every colour a cell can hold is 8-bit at its source: theme hexes divide an
+/// integer byte by 255, as do the 256-colour cube, the grayscale ramp, and SGR
+/// truecolour. So this is lossless, and it takes `Cell` from 64 bytes to 16 —
+/// which is a quarter of the memory traffic for every grid copy, snapshot and
+/// scrollback row, and a quarter of the resident scrollback.
+struct PackedColor: Hashable {
+    let value: UInt32
+
+    init(_ value: UInt32) { self.value = value }
+
+    init(_ c: SIMD4<Float>) {
+        let lo = SIMD4<Float>(repeating: 0)
+        let hi = SIMD4<Float>(repeating: 255)
+        let v: SIMD4<Float> = (c * 255).rounded(.toNearestOrAwayFromZero)
+            .clamped(lowerBound: lo, upperBound: hi)
+        self.value = UInt32(v.x) | (UInt32(v.y) << 8) | (UInt32(v.z) << 16) | (UInt32(v.w) << 24)
+    }
+
+    /// Back to float RGBA, for the code that still works in that space —
+    /// the flat-quad colours and the faint blend.
+    var simd: SIMD4<Float> {
+        SIMD4<Float>(Float(value & 0xFF),
+                     Float((value >> 8) & 0xFF),
+                     Float((value >> 16) & 0xFF),
+                     Float((value >> 24) & 0xFF)) / 255
+    }
+}
+
 struct Theme: Identifiable, Equatable {
     let id: String
     let name: String

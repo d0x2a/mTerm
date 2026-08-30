@@ -12,8 +12,8 @@ struct CellAttrs: OptionSet {
 
 struct Cell {
     var scalar: Unicode.Scalar
-    var fg: SIMD4<Float>
-    var bg: SIMD4<Float>
+    var fg: PackedColor
+    var bg: PackedColor
     var attrs: CellAttrs
     /// Columns this cell occupies: 1 for an ordinary glyph, 2 for the leading
     /// half of a double-width one, and 0 for the trailing half it reserves.
@@ -22,8 +22,8 @@ struct Cell {
     var width: UInt8
 
     init(scalar: Unicode.Scalar = " ",
-         fg: SIMD4<Float>? = nil,
-         bg: SIMD4<Float>? = nil,
+         fg: PackedColor? = nil,
+         bg: PackedColor? = nil,
          attrs: CellAttrs = [],
          width: UInt8 = 1) {
         self.scalar = scalar
@@ -36,8 +36,8 @@ struct Cell {
             self.bg = bg
         } else {
             let theme = ThemeStore.currentTheme
-            self.fg = fg ?? theme.foreground
-            self.bg = bg ?? theme.background
+            self.fg = fg ?? PackedColor(theme.foreground)
+            self.bg = bg ?? PackedColor(theme.background)
         }
         self.attrs = attrs
         self.width = width
@@ -133,8 +133,8 @@ enum MouseEncoding {
 final class TerminalState: ParserSink {
     // Theme-derived helpers — read at the call site so future writes always
     // use the current theme. Existing cells keep their previously-baked RGB.
-    static var defaultFg: SIMD4<Float> { ThemeStore.currentTheme.foreground }
-    static var defaultBg: SIMD4<Float> { ThemeStore.currentTheme.background }
+    static var defaultFg: PackedColor { PackedColor(ThemeStore.currentTheme.foreground) }
+    static var defaultBg: PackedColor { PackedColor(ThemeStore.currentTheme.background) }
 
     private(set) var cols: Int
     private(set) var rows: Int
@@ -232,14 +232,14 @@ final class TerminalState: ParserSink {
     /// escape. `title` is empty for OSC 9, which carries only a body.
     var onNotify: ((_ title: String, _ body: String) -> Void)?
 
-    private var currentFg: SIMD4<Float>
-    private var currentBg: SIMD4<Float>
+    private var currentFg: PackedColor
+    private var currentBg: PackedColor
     private var currentAttrs: CellAttrs = []
 
     // DECSC / DECRC slot (separate from alt-screen stash).
     private var savedCursor: (col: Int, row: Int) = (0, 0)
-    private var savedFg: SIMD4<Float>
-    private var savedBg: SIMD4<Float>
+    private var savedFg: PackedColor
+    private var savedBg: PackedColor
     private var savedAttrs: CellAttrs = []
 
     // Alt-screen support. When usingAlt is true, `cells` is the alt buffer
@@ -247,8 +247,8 @@ final class TerminalState: ParserSink {
     private var usingAlt: Bool = false
     private var stashedCells: [Cell] = []
     private var stashedCursor: (col: Int, row: Int) = (0, 0)
-    private var stashedFg: SIMD4<Float>
-    private var stashedBg: SIMD4<Float>
+    private var stashedFg: PackedColor
+    private var stashedBg: PackedColor
     private var stashedAttrs: CellAttrs = []
 
     init(cols: Int, rows: Int) {
@@ -256,12 +256,12 @@ final class TerminalState: ParserSink {
         self.rows = max(1, rows)
         self.scrollBottom = self.rows - 1
         let theme = ThemeStore.currentTheme
-        self.currentFg = theme.foreground
-        self.currentBg = theme.background
-        self.savedFg = theme.foreground
-        self.savedBg = theme.background
-        self.stashedFg = theme.foreground
-        self.stashedBg = theme.background
+        self.currentFg = PackedColor(theme.foreground)
+        self.currentBg = PackedColor(theme.background)
+        self.savedFg = PackedColor(theme.foreground)
+        self.savedBg = PackedColor(theme.background)
+        self.stashedFg = PackedColor(theme.foreground)
+        self.stashedBg = PackedColor(theme.background)
         self.cells = Array(repeating: Cell(), count: self.cols * self.rows)
         self.tabStops = Self.defaultTabStops(cols: self.cols)
     }
@@ -840,12 +840,12 @@ final class TerminalState: ParserSink {
         // range. We populate ANSI first, then let fg/bg override on collision —
         // default-styled cells are common, explicit SGR 93/107 cells are rare,
         // so this prioritization keeps the common case right.
-        var colorMap: [SIMD4<Float>: SIMD4<Float>] = [:]
+        var colorMap: [PackedColor: PackedColor] = [:]
         for i in 0..<min(old.ansi.count, new.ansi.count) {
-            colorMap[old.ansi[i]] = new.ansi[i]
+            colorMap[PackedColor(old.ansi[i])] = PackedColor(new.ansi[i])
         }
-        colorMap[old.foreground] = new.foreground
-        colorMap[old.background] = new.background
+        colorMap[PackedColor(old.foreground)] = PackedColor(new.foreground)
+        colorMap[PackedColor(old.background)] = PackedColor(new.background)
 
         for i in 0..<cells.count {
             if let nfg = colorMap[cells[i].fg] { cells[i].fg = nfg }
@@ -1185,8 +1185,8 @@ final class TerminalState: ParserSink {
         cursorCol = 0
         cursorRow = 0
         let theme = ThemeStore.currentTheme
-        currentFg = theme.foreground
-        currentBg = theme.background
+        currentFg = PackedColor(theme.foreground)
+        currentBg = PackedColor(theme.background)
         currentAttrs = []
         scrollTop = 0
         scrollBottom = rows - 1
@@ -1214,8 +1214,8 @@ final class TerminalState: ParserSink {
         cursorCol = 0
         cursorRow = 0
         let theme = ThemeStore.currentTheme
-        currentFg = theme.foreground
-        currentBg = theme.background
+        currentFg = PackedColor(theme.foreground)
+        currentBg = PackedColor(theme.background)
         currentAttrs = []
         cursorVisible = true
         scrollTop = 0
@@ -1544,8 +1544,8 @@ final class TerminalState: ParserSink {
             let p = params[i]
             switch p {
             case 0:
-                currentFg = theme.foreground
-                currentBg = theme.background
+                currentFg = PackedColor(theme.foreground)
+                currentBg = PackedColor(theme.background)
                 currentAttrs = []
             case 1:  currentAttrs.insert(.bold)
             case 2:  currentAttrs.insert(.faint)
@@ -1557,21 +1557,21 @@ final class TerminalState: ParserSink {
             case 24: currentAttrs.remove(.underline)
             case 27: currentAttrs.remove(.inverse)
             case 30...37:
-                currentFg = palette[p - 30]
+                currentFg = PackedColor(palette[p - 30])
             case 38:
-                if let color = readExtendedColor(params, index: &i, palette: palette) { currentFg = color }
+                if let color = readExtendedColor(params, index: &i, palette: palette) { currentFg = PackedColor(color) }
             case 39:
-                currentFg = theme.foreground
+                currentFg = PackedColor(theme.foreground)
             case 40...47:
-                currentBg = palette[p - 40]
+                currentBg = PackedColor(palette[p - 40])
             case 48:
-                if let color = readExtendedColor(params, index: &i, palette: palette) { currentBg = color }
+                if let color = readExtendedColor(params, index: &i, palette: palette) { currentBg = PackedColor(color) }
             case 49:
-                currentBg = theme.background
+                currentBg = PackedColor(theme.background)
             case 90...97:
-                currentFg = palette[p - 90 + 8]
+                currentFg = PackedColor(palette[p - 90 + 8])
             case 100...107:
-                currentBg = palette[p - 100 + 8]
+                currentBg = PackedColor(palette[p - 100 + 8])
             default:
                 break
             }
