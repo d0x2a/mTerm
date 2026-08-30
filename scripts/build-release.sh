@@ -81,11 +81,14 @@ tiffutil -cathidpicheck "$BG_DIR/background.png" "$BG_DIR/background@2x.png" \
     -out "$BG_DIR/background.tiff" >/dev/null
 
 # create-dmg (from Homebrew) handles layout: positions mTerm.app on the
-# left, an Applications drop-link on the right, and paints the background.
+# left, an Applications drop-link on the right, paints the background, and
+# sets the volume icon so the mounted disk shows the app icon rather than
+# the generic removable-drive one.
 # It returns non-zero if a Finder AppleScript step transiently fails, so
 # we ignore exit status as long as the DMG actually got written.
 create-dmg \
     --volname "mTerm $VERSION" \
+    --volicon "$APP/Contents/Resources/AppIcon.icns" \
     --background "$BG_DIR/background.tiff" \
     --window-pos 200 120 \
     --window-size 600 400 \
