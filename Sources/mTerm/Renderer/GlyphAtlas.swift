@@ -72,6 +72,14 @@ final class GlyphAtlas {
     private var entries: [GlyphKey: GlyphEntry] = [:]
     /// Cached per-scalar resolution. nil = known-missing across primary + fallback.
     private var scalarToResolved: [UInt32: Resolved?] = [:]
+    /// Direct-mapped fast path for ASCII, which is very nearly everything a
+    /// terminal draws. The general path costs two dictionary probes per glyph
+    /// per *frame* — scalar → resolved font, then (font, glyph) → atlas entry —
+    /// and at a screenful of text per frame that dominated the atlas's share of
+    /// the frame build. Only successful lookups are cached: a glyph that came
+    /// back nil because the atlas was momentarily full still retries later,
+    /// exactly as it did before.
+    private var asciiEntries = [GlyphEntry?](repeating: nil, count: 128)
     /// Extra blank pixels around each glyph in the atlas. 2px (not 1) so the
     /// sub-pixel offset baked into the rasterization (see `rasterize`) can't
     /// push anti-aliased pixels past the bitmap edge.
@@ -155,6 +163,15 @@ final class GlyphAtlas {
     }
 
     func entry(for scalar: Unicode.Scalar) -> GlyphEntry? {
+        let value = scalar.value
+        if value < 128, let cached = asciiEntries[Int(value)] { return cached }
+        let entry = resolvedEntry(for: scalar)
+        if value < 128, let entry { asciiEntries[Int(value)] = entry }
+        return entry
+    }
+
+    /// The general two-dictionary path, for anything the ASCII cache can't answer.
+    private func resolvedEntry(for scalar: Unicode.Scalar) -> GlyphEntry? {
         if let cached = scalarToResolved[scalar.value] {
             guard let r = cached else { return nil }
             return entry(font: r.font, glyph: r.glyph, isColor: r.isColor)

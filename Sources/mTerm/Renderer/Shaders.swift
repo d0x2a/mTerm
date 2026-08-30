@@ -3,13 +3,14 @@ enum Shaders {
     #include <metal_stdlib>
     using namespace metal;
 
+    // Must match Renderer.CellInstance byte for byte:
+    // glyphPos @0, atlasPos @8, atlasSize @12, fgColor @16, flags @20, size 24.
     struct CellInstance {
         float2 glyphPos;
-        float2 glyphSize;
-        float2 atlasPos;
-        float2 atlasSize;
-        float4 fgColor;
-        float isColor;
+        ushort2 atlasPos;
+        ushort2 atlasSize;
+        uint fgColor;
+        uint flags;
     };
 
     struct FlatInstance {
@@ -53,16 +54,20 @@ enum Shaders {
                                 constant Uniforms &uniforms [[buffer(1)]]) {
         CellInstance inst = instances[iid];
         float2 corner = unitCorner(vid);
-        float2 pixelPos = inst.glyphPos + corner * inst.glyphSize;
+        // The quad on screen and its rect in the atlas are the same size, so a
+        // single extent drives both.
+        float2 extent = float2(inst.atlasSize);
+        float2 pixelPos = inst.glyphPos + corner * extent;
 
-        float2 atlasPx = inst.atlasPos + corner * inst.atlasSize;
-        float2 sheet = inst.isColor > 0.5 ? uniforms.colorAtlasSize : uniforms.atlasSize;
+        float2 atlasPx = float2(inst.atlasPos) + corner * extent;
+        bool isColor = (inst.flags & 1u) != 0u;
+        float2 sheet = isColor ? uniforms.colorAtlasSize : uniforms.atlasSize;
 
         VOutGlyph out;
         out.position = float4(pixelToNDC(pixelPos, uniforms.viewportSize), 0.0, 1.0);
         out.atlasUV = atlasPx / sheet;
-        out.color = inst.fgColor;
-        out.isColor = inst.isColor;
+        out.color = unpack_unorm4x8_to_float(inst.fgColor);
+        out.isColor = isColor ? 1.0 : 0.0;
         return out;
     }
 

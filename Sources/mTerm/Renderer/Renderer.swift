@@ -4,15 +4,37 @@ import Metal
 import QuartzCore
 import simd
 
+/// One glyph quad. 24 bytes — a full screen is ~8.5k of these, and the frame
+/// spends real time writing and uploading them, so the layout is packed:
+/// the quad's on-screen size and its atlas footprint are the same rectangle
+/// (they always were — `glyphSize` used to be a verbatim copy of `atlasSize`),
+/// and 16 bits is ample against a 2048² atlas.
 private struct CellInstance {
+    /// Top-left of the quad, in drawable pixels.
     var glyphPos: SIMD2<Float>
-    var glyphSize: SIMD2<Float>
-    var atlasPos: SIMD2<Float>
-    var atlasSize: SIMD2<Float>
-    var fgColor: SIMD4<Float>
-    /// 1 = sample the color atlas as-is, 0 = tint the coverage atlas with
-    /// fgColor. A float because it rides along to the shader as vertex data.
-    var isColor: Float
+    var atlasPos: SIMD2<UInt16>
+    /// Size of the quad *and* of its atlas rect.
+    var atlasSize: SIMD2<UInt16>
+    /// RGBA8, red in the low byte — what Metal's `unpack_unorm4x8_to_float`
+    /// expects. Terminal colors are 8-bit at every source (theme hexes, the
+    /// 256-color palette, SGR truecolor), so packing costs no fidelity.
+    var fgColor: UInt32
+    /// Bit 0: sample the color atlas as-is instead of tinting coverage with fgColor.
+    var flags: UInt32
+}
+
+/// Float RGBA in [0,1] → RGBA8 with red in the low byte.
+@inline(__always)
+private func packColor(_ c: SIMD4<Float>) -> UInt32 {
+    let lo = SIMD4<Float>(repeating: 0)
+    let hi = SIMD4<Float>(repeating: 255)
+    let v: SIMD4<Float> = (c * 255).rounded(.toNearestOrAwayFromZero)
+        .clamped(lowerBound: lo, upperBound: hi)
+    let r = UInt32(v.x)
+    let g = UInt32(v.y)
+    let b = UInt32(v.z)
+    let a = UInt32(v.w)
+    return r | (g << 8) | (b << 16) | (a << 24)
 }
 
 private struct FlatInstance {
@@ -94,6 +116,12 @@ final class Renderer {
     private var glyphCapacity = 0
     private var flatBuffer: MTLBuffer?
     private var flatCapacity = 0
+
+    /// Instance staging, kept across frames. These reach ~8.5k glyphs and ~10k
+    /// flats on a full screen; reallocating and regrowing them every frame was
+    /// pure overhead in the keystroke path.
+    private var flatScratch: [FlatInstance] = []
+    private var glyphScratch: [CellInstance] = []
 
     init(device: MTLDevice, pixelFormat: MTLPixelFormat, scale: CGFloat,
          fontFamily: String = FontCatalog.defaultFamily,
@@ -209,16 +237,16 @@ final class Renderer {
         }
     }
 
+    /// Fills `flatScratch` and `glyphScratch` with this frame's instances.
     private func buildInstances(from snapshot: TerminalSnapshot,
                                 selection: Selection?,
                                 highlights: [HighlightBand],
                                 focused: Bool,
                                 cursorOn: Bool,
-                                viewportPixels: SIMD2<Float>)
-        -> (flat: [FlatInstance], glyphs: [CellInstance]) {
-        var flats: [FlatInstance] = []
-        var glyphs: [CellInstance] = []
-        glyphs.reserveCapacity(snapshot.cells.count / 2)
+                                viewportPixels: SIMD2<Float>) {
+        flatScratch.removeAll(keepingCapacity: true)
+        glyphScratch.removeAll(keepingCapacity: true)
+        glyphScratch.reserveCapacity(snapshot.cells.count / 2)
 
         let cellWidth = layout.cellWidth
         let cellHeight = layout.cellHeight
@@ -243,7 +271,7 @@ final class Renderer {
             let w = Float(h.length) * cellWidth
             switch h.style {
             case .background, .both:
-                flats.append(FlatInstance(
+                flatScratch.append(FlatInstance(
                     pos: SIMD2<Float>(x, y),
                     size: SIMD2<Float>(w, cellHeight),
                     color: h.color
@@ -256,7 +284,7 @@ final class Renderer {
                 // Underline color uses the band's RGB but at full opacity, so
                 // the line stays visible even when the tint alpha is low.
                 let underlineColor = SIMD4<Float>(h.color.x, h.color.y, h.color.z, 1.0)
-                flats.append(FlatInstance(
+                flatScratch.append(FlatInstance(
                     pos: SIMD2<Float>(x, y + underlineTop),
                     size: SIMD2<Float>(w, underlineThickness),
                     color: underlineColor
@@ -266,65 +294,76 @@ final class Renderer {
             }
         }
 
-        for row in 0..<snapshot.rows {
-            let baselineY = origin.y + Float(row) * cellHeight + ascent
-            let cellTop = origin.y + Float(row) * cellHeight
-            for col in 0..<snapshot.cols {
-                let cell = snapshot.cells[row * snapshot.cols + col]
-                let isCursor = snapshot.cursorVisible
-                    && col == snapshot.cursorCol
-                    && row == snapshot.cursorRow
-                let isSelected = selection?.contains(col: col, row: row) == true
-                let cellLeft = origin.x + Float(col) * cellWidth
-                let cellRect = (
-                    pos: SIMD2<Float>(cellLeft, cellTop),
-                    size: SIMD2<Float>(cellWidth, cellHeight)
-                )
+        let cols = snapshot.cols
+        // One bounds-checked subscript per cell adds up at ~10k cells a frame.
+        snapshot.cells.withUnsafeBufferPointer { cells in
+            for row in 0..<snapshot.rows {
+                let baselineY = origin.y + Float(row) * cellHeight + ascent
+                let cellTop = origin.y + Float(row) * cellHeight
+                // Resolve the selection to a column span once per row, rather
+                // than asking `contains` about every cell in it.
+                var selectionStart = Int.max
+                var selectionEnd = Int.min
+                if let selection, row >= selection.startRow, row <= selection.endRow {
+                    selectionStart = row == selection.startRow ? selection.startCol : 0
+                    selectionEnd = row == selection.endRow ? selection.endCol : cols - 1
+                }
+                let cursorOnThisRow = snapshot.cursorVisible && row == snapshot.cursorRow
+                let rowBase = row * cols
+                for col in 0..<cols {
+                    let cell = cells[rowBase + col]
+                    let isCursor = cursorOnThisRow && col == snapshot.cursorCol
+                    let isSelected = col >= selectionStart && col <= selectionEnd
+                    let cellLeft = origin.x + Float(col) * cellWidth
+                    let cellRect = (
+                        pos: SIMD2<Float>(cellLeft, cellTop),
+                        size: SIMD2<Float>(cellWidth, cellHeight)
+                    )
 
-                // Per-cell flat instances, painted bottom-up: bg → selection → cursor.
-                if cell.bg != defaultBg {
-                    flats.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: cell.bg))
-                }
-                if isSelected {
-                    flats.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: selectionColor))
-                }
-                if isCursor && focused && cursorOn {
-                    flats.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: cursorColor))
-                }
-                // Otherwise: unfocused window or "off" half of the blink → no cursor.
+                    // Per-cell flat instances, painted bottom-up: bg → selection → cursor.
+                    if cell.bg != defaultBg {
+                        flatScratch.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: cell.bg))
+                    }
+                    if isSelected {
+                        flatScratch.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: selectionColor))
+                    }
+                    if isCursor && focused && cursorOn {
+                        flatScratch.append(FlatInstance(pos: cellRect.pos, size: cellRect.size, color: cursorColor))
+                    }
+                    // Otherwise: unfocused window or "off" half of the blink → no cursor.
 
-                // Glyph: skip blank cells, and the trailing half of a
-                // double-width glyph — its head already drew across both cells.
-                if cell.isContinuation { continue }
-                if cell.scalar == " " { continue }
-                guard let entry = glyphAtlas.entry(for: cell.scalar),
-                      entry.atlasSize.x > 0 else { continue }
+                    // Glyph: skip blank cells, and the trailing half of a
+                    // double-width glyph — its head already drew across both cells.
+                    if cell.isContinuation { continue }
+                    if cell.scalar == " " { continue }
+                    guard let entry = glyphAtlas.entry(for: cell.scalar),
+                          entry.atlasSize.x > 0 else { continue }
 
-                let glyphPos = SIMD2<Float>(
-                    cellLeft + entry.bearing.x,
-                    baselineY + entry.bearing.y
-                )
-                // Glyph color flips to the cell's bg ONLY when a focused filled
-                // cursor is drawn on top of it (the classic inverted look).
-                let invertGlyph = isCursor && focused && cursorOn
-                var glyphFg = invertGlyph ? cell.bg : cell.fg
-                // Faint (SGR 2): blend the foreground toward the background,
-                // matching how iTerm2 renders dimmed text (e.g. ghost text).
-                if cell.attrs.contains(.faint) {
-                    glyphFg = mix(glyphFg, cell.bg, t: 0.5)
+                    let glyphPos = SIMD2<Float>(
+                        cellLeft + entry.bearing.x,
+                        baselineY + entry.bearing.y
+                    )
+                    // Glyph color flips to the cell's bg ONLY when a focused filled
+                    // cursor is drawn on top of it (the classic inverted look).
+                    let invertGlyph = isCursor && focused && cursorOn
+                    var glyphFg = invertGlyph ? cell.bg : cell.fg
+                    // Faint (SGR 2): blend the foreground toward the background,
+                    // matching how iTerm2 renders dimmed text (e.g. ghost text).
+                    if cell.attrs.contains(.faint) {
+                        glyphFg = mix(glyphFg, cell.bg, t: 0.5)
+                    }
+                    glyphScratch.append(CellInstance(
+                        glyphPos: glyphPos,
+                        atlasPos: SIMD2<UInt16>(UInt16(entry.atlasOrigin.x),
+                                                UInt16(entry.atlasOrigin.y)),
+                        atlasSize: SIMD2<UInt16>(UInt16(entry.atlasSize.x),
+                                                 UInt16(entry.atlasSize.y)),
+                        fgColor: packColor(glyphFg),
+                        flags: entry.isColor ? 1 : 0
+                    ))
                 }
-                glyphs.append(CellInstance(
-                    glyphPos: glyphPos,
-                    glyphSize: entry.atlasSize,
-                    atlasPos: entry.atlasOrigin,
-                    atlasSize: entry.atlasSize,
-                    fgColor: glyphFg,
-                    isColor: entry.isColor ? 1 : 0
-                ))
             }
         }
-
-        return (flats, glyphs)
     }
 
 
@@ -361,17 +400,17 @@ final class Renderer {
         let drawableSize = layer.drawableSize
 
         let viewportPx = SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
-        let (flats, glyphs) = buildInstances(from: snapshot,
-                                             selection: selection,
-                                             highlights: highlights,
-                                             focused: focused,
-                                             cursorOn: cursorOn,
-                                             viewportPixels: viewportPx)
+        buildInstances(from: snapshot,
+                       selection: selection,
+                       highlights: highlights,
+                       focused: focused,
+                       cursorOn: cursorOn,
+                       viewportPixels: viewportPx)
 
-        growBuffer(&flatBuffer, capacity: &flatCapacity, count: flats.count, type: FlatInstance.self)
-        growBuffer(&glyphBuffer, capacity: &glyphCapacity, count: glyphs.count, type: CellInstance.self)
-        if !flats.isEmpty, let buf = flatBuffer { copyInto(buf, flats) }
-        if !glyphs.isEmpty, let buf = glyphBuffer { copyInto(buf, glyphs) }
+        growBuffer(&flatBuffer, capacity: &flatCapacity, count: flatScratch.count, type: FlatInstance.self)
+        growBuffer(&glyphBuffer, capacity: &glyphCapacity, count: glyphScratch.count, type: CellInstance.self)
+        if !flatScratch.isEmpty, let buf = flatBuffer { copyInto(buf, flatScratch) }
+        if !glyphScratch.isEmpty, let buf = glyphBuffer { copyInto(buf, glyphScratch) }
 
         var uniforms = Uniforms(
             viewportSize: SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height)),
@@ -393,7 +432,7 @@ final class Renderer {
               let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
 
         // Flat pass: cell backgrounds + cursor.
-        if !flats.isEmpty, let buf = flatBuffer {
+        if !flatScratch.isEmpty, let buf = flatBuffer {
             enc.setRenderPipelineState(flatPipeline)
             enc.setVertexBuffer(buf, offset: 0, index: 0)
             enc.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
@@ -401,12 +440,12 @@ final class Renderer {
                 type: .triangleStrip,
                 vertexStart: 0,
                 vertexCount: 4,
-                instanceCount: flats.count
+                instanceCount: flatScratch.count
             )
         }
 
         // Glyph pass.
-        if !glyphs.isEmpty, let buf = glyphBuffer {
+        if !glyphScratch.isEmpty, let buf = glyphBuffer {
             enc.setRenderPipelineState(glyphPipeline)
             enc.setVertexBuffer(buf, offset: 0, index: 0)
             enc.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
@@ -417,7 +456,7 @@ final class Renderer {
                 type: .triangleStrip,
                 vertexStart: 0,
                 vertexCount: 4,
-                instanceCount: glyphs.count
+                instanceCount: glyphScratch.count
             )
         }
 

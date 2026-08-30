@@ -186,6 +186,15 @@ final class TerminalView: NSView, CALayerDelegate {
         updateDrawableSize()
         ensureSession()
         let link = window.displayLink(target: self, selector: #selector(tick(_:)))
+        // Ask for the panel's full rate. Left unset the system chooses, and a
+        // rate below the display's maximum doesn't only pace the tick — it also
+        // feeds `frameInterval` (see tick), which gates whether a keystroke echo
+        // presents immediately or waits for the next tick. The floor stays low
+        // so an idle terminal can still be throttled down.
+        let maxFPS = Float(window.screen?.maximumFramesPerSecond ?? 60)
+        link.preferredFrameRateRange = CAFrameRateRange(
+            minimum: min(30, maxFPS), maximum: maxFPS, preferred: maxFPS
+        )
         link.add(to: .main, forMode: .common)
         displayLink = link
         window.makeFirstResponder(self)
@@ -292,6 +301,14 @@ final class TerminalView: NSView, CALayerDelegate {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if mods.contains(.command) {
+            // ⌘ can have gone down while this window wasn't key, in which case
+            // flagsChanged never ran and the matches — which renderFrame only
+            // computes while ⌘ is held — are still empty. Catch up here so a
+            // ⌘-click that activates the window still lands on its link.
+            if !commandHeld {
+                commandHeld = true
+                refreshTriggerMatches()
+            }
             if let match = triggerMatch(at: coord) {
                 handleTriggerClick(match)
                 return                       // don't start a selection
@@ -369,6 +386,20 @@ final class TerminalView: NSView, CALayerDelegate {
     private func isWordChar(_ s: Unicode.Scalar) -> Bool {
         if CharacterSet.alphanumerics.contains(s) { return true }
         return "_-./~:+@%".unicodeScalars.contains(s)
+    }
+
+    /// Recomputes trigger matches outside the render loop. renderFrame only
+    /// evaluates them while ⌘ is down (see there), so the moment ⌘ *goes* down
+    /// has to fill them in itself — updateCursorAffordance reads them
+    /// synchronously, a frame before the next render would have.
+    private func refreshTriggerMatches() {
+        guard let session else {
+            currentTriggerMatches = []
+            return
+        }
+        currentTriggerMatches = triggerEvaluator.evaluate(
+            snapshot: session.snapshot(scrollOffset: scrollOffset)
+        )
     }
 
     private func triggerMatch(at coord: (col: Int, row: Int)) -> TriggerMatch? {
@@ -455,6 +486,7 @@ final class TerminalView: NSView, CALayerDelegate {
         let cmd = event.modifierFlags.contains(.command)
         if cmd != commandHeld {
             commandHeld = cmd
+            if cmd { refreshTriggerMatches() }
             updateCursorAffordance()
         }
     }
@@ -1021,7 +1053,15 @@ final class TerminalView: NSView, CALayerDelegate {
                                    cwd: snapshot.currentDirectory,
                                    foregroundProcess: fgProcess)
         }
-        currentTriggerMatches = triggerEvaluator.evaluate(snapshot: snapshot)
+        // Trigger matches are only ever read while ⌘ is held — ⌘-click, the
+        // pointing-hand affordance, and the highlight bands all gate on it — so
+        // evaluating on every frame spent a quarter-millisecond of the keystroke
+        // path building a string per row and running regexes over them, only to
+        // throw the answer away. Cleared rather than stale when ⌘ is up, so
+        // nothing can read matches that describe a screen we've since redrawn.
+        currentTriggerMatches = commandHeld
+            ? triggerEvaluator.evaluate(snapshot: snapshot)
+            : []
 
         let focused = window?.isKeyWindow ?? false
         needsFrame = false
