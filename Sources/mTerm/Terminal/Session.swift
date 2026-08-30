@@ -22,6 +22,24 @@ final class Session {
     private let signalLock = NSLock()
     private var outputSignalPending = false
 
+    /// The bottom-of-buffer view as of the last change, republished by the
+    /// session queue. The main thread reads it without touching that queue.
+    ///
+    /// `drain()` holds the queue for a whole burst of output — milliseconds at
+    /// a time — and every frame used to block on it to take a snapshot, and
+    /// every tick to ask whether a synchronized update was open. So while the
+    /// child was writing, the main thread spent most of its time waiting, which
+    /// is what made typing during a build feel sticky. Nothing else mutates the
+    /// state, so between bursts this is exactly what the queue would have
+    /// returned; during one, the view draws the previous frame's contents
+    /// instead of stalling, and the burst's own signal brings it up to date.
+    private struct Published {
+        let snapshot: TerminalSnapshot
+        let synchronizedUpdateActive: Bool
+    }
+    private let publishedLock = NSLock()
+    private var published: Published?
+
     /// Called on the main thread when the child rings the terminal bell.
     var onBell: (() -> Void)?
 
@@ -55,8 +73,37 @@ final class Session {
         readSource?.cancel()
     }
 
+    /// Must run on `queue`.
+    private func publish() {
+        let value = Published(snapshot: state.viewportSnapshot(scrollOffset: 0),
+                              synchronizedUpdateActive: state.synchronizedUpdateActive)
+        publishedLock.lock()
+        published = value
+        publishedLock.unlock()
+    }
+
+    /// Drops the published view so the next read falls back to the queue, which
+    /// is FIFO behind the change that is about to be enqueued. Used where a
+    /// frame drawn from the previous state would be visibly wrong rather than
+    /// merely a beat behind — a resize, where it would have the old geometry.
+    private func invalidatePublished() {
+        publishedLock.lock()
+        published = nil
+        publishedLock.unlock()
+    }
+
+    private var publishedValue: Published? {
+        publishedLock.lock()
+        defer { publishedLock.unlock() }
+        return published
+    }
+
     func snapshot(scrollOffset: Int = 0) -> TerminalSnapshot {
-        queue.sync { state.viewportSnapshot(scrollOffset: scrollOffset) }
+        // Scrolled back, the viewport has to be composed out of history, which
+        // only the queue can do. Typing snaps to the bottom, so the path that
+        // has to stay quick is always offset 0.
+        if scrollOffset == 0, let value = publishedValue { return value.snapshot }
+        return queue.sync { state.viewportSnapshot(scrollOffset: scrollOffset) }
     }
 
     /// The modes the view has to honor, fetched in one hop so a mouse event
@@ -80,7 +127,8 @@ final class Session {
     /// True while the child holds a synchronized-update frame open (DEC 2026).
     /// The view stops presenting new frames until it closes.
     var isSynchronizedUpdateActive: Bool {
-        queue.sync { state.synchronizedUpdateActive }
+        if let value = publishedValue { return value.synchronizedUpdateActive }
+        return queue.sync { state.synchronizedUpdateActive }
     }
 
     /// Whole-buffer text (scrollback + active grid) for "Copy All".
@@ -121,7 +169,9 @@ final class Session {
     /// Runs on the session queue so it doesn't race with the parser.
     func applyThemeChange(from old: Theme, to new: Theme) {
         queue.async { [weak self] in
-            self?.state.applyThemeChange(from: old, to: new)
+            guard let self else { return }
+            self.state.applyThemeChange(from: old, to: new)
+            self.publish()
         }
     }
 
@@ -139,8 +189,13 @@ final class Session {
     }
 
     func resize(cols: Int, rows: Int) {
+        // A frame drawn between here and the reflow would carry the old
+        // geometry, so make readers wait on the queue until it lands.
+        invalidatePublished()
         queue.async { [weak self] in
-            self?.state.resize(cols: cols, rows: rows)
+            guard let self else { return }
+            self.state.resize(cols: cols, rows: rows)
+            self.publish()
         }
         pty.resize(cols: cols, rows: rows)
     }
@@ -180,9 +235,14 @@ final class Session {
         }
     }
 
+    /// How long this loop may go without publishing what it has parsed.
+    /// Roughly a frame at 120 Hz.
+    private static let publishInterval: UInt64 = 8_000_000   // ns
+
     private func drain() {
         var produced = false
-        defer { if produced { signalOutput() } }
+        defer { if produced { publish(); signalOutput() } }
+        var lastPublish = DispatchTime.now().uptimeNanoseconds
         var buf = [UInt8](repeating: 0, count: 8192)
         while true {
             let n = buf.withUnsafeMutableBufferPointer { ptr in
@@ -194,6 +254,16 @@ final class Session {
                     parser.feed(bytes: slice)
                 }
                 produced = true
+                // This loop runs until the writer pauses, which under something
+                // like `cat` on a large file is seconds. Publishing only on the
+                // way out would leave the view redrawing the pre-burst frame for
+                // that whole time, so hand it a fresh one as we go.
+                let now = DispatchTime.now().uptimeNanoseconds
+                if now &- lastPublish >= Self.publishInterval {
+                    lastPublish = now
+                    publish()
+                    signalOutput()
+                }
             } else if n == 0 {
                 readSource?.cancel()
                 notifyChildExit()
