@@ -24,6 +24,10 @@ final class TerminalView: NSView, CALayerDelegate {
         session?.foregroundProcess()
     }
 
+    /// Last grid size handed to the session, so a resize that doesn't cross a
+    /// cell boundary doesn't re-announce the same dimensions.
+    private var lastReportedGrid: (cols: Int, rows: Int)?
+
     private var scrollOffset: Int = 0
     private var scrollResidue: CGFloat = 0
     private var lastScrollbackLines: Int = 0
@@ -975,6 +979,13 @@ final class TerminalView: NSView, CALayerDelegate {
     private func resizeSessionIfNeeded() {
         guard let session, let (cols, rows) = gridDimensions() else { return }
         session.resize(cols: cols, rows: rows)
+        // Only on an actual change: a drag inside one cell fires setFrameSize
+        // repeatedly with the same grid, and the readout shouldn't blink.
+        if let last = lastReportedGrid, last == (cols, rows) { return }
+        let first = lastReportedGrid == nil
+        lastReportedGrid = (cols, rows)
+        guard !first else { return }        // opening a tab isn't a resize
+        delegate?.terminalView(self, didResizeGridTo: cols, rows: rows)
     }
 
     @objc private func tick(_ sender: CADisplayLink) {

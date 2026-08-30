@@ -12,6 +12,7 @@ protocol TerminalViewDelegate: AnyObject {
     func terminalView(_ view: TerminalView, didUpdate title: String, cwd: String?, foregroundProcess: String?)
     func terminalViewDidTerminate(_ view: TerminalView)
     func terminalView(_ view: TerminalView, didRequestAttention attention: TerminalAttention)
+    func terminalView(_ view: TerminalView, didResizeGridTo cols: Int, rows: Int)
 }
 
 final class MainWindowController: NSWindowController, NSWindowDelegate,
@@ -26,6 +27,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     private let sidebar = SidebarView()
     private let contentContainer = NSView()
     private let splitVC = WideDividerSplitViewController()
+    private let gridHUD = GridSizeHUD()
+    private var gridHUDHideTimer: Timer?
 
     init(initialCwd: String? = nil) {
         let window = NSWindow(
@@ -66,6 +69,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         splitVC.splitViewItems = [sidebarItem, contentItem]
         splitVC.splitView.autosaveName = "mTerm.Sidebar"
         window.contentViewController = splitVC
+
+        gridHUD.translatesAutoresizingMaskIntoConstraints = false
+        gridHUD.isHidden = true
+        contentContainer.addSubview(gridHUD)
+        NSLayoutConstraint.activate([
+            gridHUD.centerXAnchor.constraint(equalTo: contentContainer.centerXAnchor),
+            gridHUD.centerYAnchor.constraint(equalTo: contentContainer.centerYAnchor),
+        ])
 
         newTab(initialCwd: initialCwd)
     }
@@ -180,10 +191,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     // MARK: internals
 
     private func installActiveTerminalView() {
-        contentContainer.subviews.forEach { $0.removeFromSuperview() }
+        contentContainer.subviews.forEach {
+            if $0 !== gridHUD { $0.removeFromSuperview() }
+        }
         guard let v = activeTerminalView else { return }
         v.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.addSubview(v)
+        contentContainer.addSubview(v, positioned: .below, relativeTo: gridHUD)
         NSLayoutConstraint.activate([
             v.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
             v.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
@@ -264,6 +277,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         }
         if activeTabId == tab.id {
             window?.title = displayWindowTitle(for: tab)
+        }
+    }
+
+    func terminalView(_ view: TerminalView, didResizeGridTo cols: Int, rows: Int) {
+        guard view === activeTerminalView else { return }
+        gridHUD.update(cols: cols, rows: rows)
+        gridHUD.alphaValue = 1
+        gridHUD.isHidden = false
+        gridHUDHideTimer?.invalidate()
+        gridHUDHideTimer = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: false) {
+            [weak self] _ in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.25
+                self.gridHUD.animator().alphaValue = 0
+            } completionHandler: {
+                self.gridHUD.isHidden = true
+            }
         }
     }
 
@@ -385,6 +416,52 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
 /// The drawn divider is only 1pt and nearly blends into the terminal, which
 /// makes the resize handle very hard to land on. We keep the look but widen the
 /// region that initiates a drag to a comfortable target on either side.
+/// The "86 × 47" readout shown while a resize is in flight. Sized to the text
+/// and centered over the terminal; never takes a click or changes the cursor.
+private final class GridSizeHUD: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        let backdrop = NSVisualEffectView()
+        backdrop.material = .hudWindow
+        backdrop.blendingMode = .withinWindow
+        backdrop.state = .active
+        backdrop.wantsLayer = true
+        backdrop.layer?.cornerRadius = 10
+        backdrop.layer?.masksToBounds = true
+        backdrop.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(backdrop)
+
+        // Monospaced digits so the box doesn't twitch as the numbers change.
+        label.font = .monospacedDigitSystemFont(ofSize: 20, weight: .medium)
+        label.alignment = .center
+        label.textColor = .labelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            backdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backdrop.topAnchor.constraint(equalTo: topAnchor),
+            backdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            widthAnchor.constraint(equalTo: label.widthAnchor, constant: 30),
+            heightAnchor.constraint(equalTo: label.heightAnchor, constant: 18),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func update(cols: Int, rows: Int) {
+        label.stringValue = "\(cols) × \(rows)"
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 private final class WideDividerSplitViewController: NSSplitViewController {
     override func splitView(_ splitView: NSSplitView,
                             effectiveRect proposedEffectiveRect: NSRect,
