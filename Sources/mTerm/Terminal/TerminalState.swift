@@ -357,6 +357,13 @@ final class TerminalState: ParserSink {
             attachMark(scalar)
             return
         }
+        // A grid narrower than the glyph has nowhere to put it. Only reachable
+        // at cols == 1 with a double-width character — the wrap below lands
+        // back on the last column, and the trailing half would then be written
+        // past the end of the row (past the end of the grid entirely, on the
+        // last row). xterm drops the character outright; so do we, before
+        // anything has been mutated.
+        guard width <= cols else { return }
         if cursorCol >= cols {
             if autoWrap {
                 cursorCol = 0
