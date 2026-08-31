@@ -8,7 +8,7 @@ A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
 ![mTerm showing a git log in the repository, with the tab sidebar on the left](docs/session.png)
 
-> **Status:** v0.7.0 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
+> **Status:** v0.8.0 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
 
 ## Why
 
