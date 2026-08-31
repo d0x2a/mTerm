@@ -48,26 +48,51 @@ struct FontFamilyPicker: NSViewRepresentable {
     func updateNSView(_ button: FontPopUpButton, context: Context) {
         context.coordinator.parent = self
 
-        // The closed control shows the current font in its own face. It holds
-        // exactly one item: the menu is never dropped, the popover is.
+        applyTitle(to: button)
+    }
+
+    /// The closed control shows the current font in its own face. It holds
+    /// exactly one menu item: the menu is never dropped, the popover is.
+    func applyTitle(to button: FontPopUpButton) {
         let menu = NSMenu()
         let item = NSMenuItem(title: selection, action: nil, keyEquivalent: "")
         if let entry = (recommended + others).first(where: { $0.displayName == selection }) {
-            item.attributedTitle = NSAttributedString(
-                string: selection,
-                attributes: [.font: entry.previewFont(size: NSFont.systemFontSize)])
+            item.attributedTitle = Self.buttonTitle(
+                selection, font: entry.previewFont(size: NSFont.systemFontSize))
         } else {
             // Chosen font has been uninstalled. Keep showing its name rather
             // than going blank — it's still what the terminal returns to if
             // the font comes back — but say so.
-            item.attributedTitle = NSAttributedString(
-                string: "\(selection) (not installed)",
-                attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
-                             .foregroundColor: NSColor.secondaryLabelColor])
+            item.attributedTitle = Self.buttonTitle(
+                "\(selection) (not installed)",
+                font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                color: .secondaryLabelColor)
         }
         menu.addItem(item)
         button.menu = menu
         button.selectItem(at: 0)
+    }
+
+    /// The closed button's title, drawn in the font it names but laid out at
+    /// a fixed line height.
+    ///
+    /// Without the pinned height the control's `firstBaselineOffsetFromTop`
+    /// follows each family's metrics — 15.5 pt for Courier against 16.5 pt
+    /// for most — and a Form row aligns on baselines, so simply choosing a
+    /// font nudged the whole row up or down. The button's *intrinsic* height
+    /// is a constant 24 pt either way, which is why this looked like it
+    /// couldn't be the control.
+    private static func buttonTitle(_ string: String,
+                                    font: NSFont,
+                                    color: NSColor? = nil) -> NSAttributedString {
+        let reference = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let line = ceil(reference.ascender - reference.descender)
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = line
+        style.maximumLineHeight = line
+        var attributes: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: style]
+        if let color { attributes[.foregroundColor] = color }
+        return NSAttributedString(string: string, attributes: attributes)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -97,7 +122,6 @@ struct FontFamilyPicker: NSViewRepresentable {
             popover.behavior = .transient
             popover.contentViewController = controller
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
-            controller.focusSearchField()
             self.popover = popover
         }
     }
@@ -241,7 +265,12 @@ final class FontListViewController: NSViewController,
         }
     }
 
-    func focusSearchField() {
+    /// Focus is taken here rather than straight after `NSPopover.show` — at
+    /// that point the popover's window may not exist yet, so the
+    /// `makeFirstResponder` lands on nothing and the first keystrokes are
+    /// dropped. `viewDidAppear` runs once the window is real.
+    override func viewDidAppear() {
+        super.viewDidAppear()
         view.window?.makeFirstResponder(searchField)
     }
 

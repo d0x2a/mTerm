@@ -131,11 +131,29 @@ private struct ThemePreview: View {
         Font(FontCatalog.makeFont(family: fontFamily, size: fontSize, scale: 1))
     }
 
-    /// mTerm's line height is a multiplier on the cell. These rows are
-    /// separate views, so the extra leading has to be stack spacing rather
-    /// than `.lineSpacing`, which only applies within one Text.
-    private var extraLeading: CGFloat {
-        CGFloat(fontSize * (lineHeight - 1))
+    /// Height of one sample row, measured from a *reference* font rather than
+    /// the selected one.
+    ///
+    /// Natural line height varies by about 5 pt between families at 13 pt
+    /// (Courier 13.0, Lantinghei TC 18.1) — roughly 15 pt across these three
+    /// rows. The Settings window sizes itself to its pane, so letting the
+    /// preview follow each family's own metrics made the whole window jump
+    /// every time a font was picked. Deriving the row height from the size
+    /// and line spacing alone keeps the block still while still reacting to
+    /// the two controls that should change it.
+    ///
+    /// It's also closer to the terminal, where every row is exactly one cell
+    /// tall no matter which glyphs land on it.
+    private var sampleRowHeight: CGFloat {
+        let reference = NSFont.monospacedSystemFont(ofSize: CGFloat(fontSize), weight: .regular)
+        return ceil((reference.ascender - reference.descender) * CGFloat(lineHeight))
+    }
+
+    /// One terminal row, at a fixed height.
+    private func sampleRow<Content: View>(
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        content().frame(height: sampleRowHeight, alignment: .leading)
     }
 
     var body: some View {
@@ -147,20 +165,26 @@ private struct ThemePreview: View {
                 ForEach(8..<16, id: \.self) { i in swatch(theme.ansi[i]) }
             }
 
-            VStack(alignment: .leading, spacing: extraLeading) {
-                Text("vadnov@mac ~ % ls -la")
-                    .foregroundColor(color(theme.foreground))
-                HStack(spacing: 0) {
-                    Text("drwxr-xr-x  ").foregroundColor(color(theme.ansi[12]))
-                    Text("4 vadnov  ").foregroundColor(color(theme.foreground))
-                    Text("staff   128 ").foregroundColor(color(theme.ansi[3]))
-                    Text("Sources").foregroundColor(color(theme.ansi[4]))
+            VStack(alignment: .leading, spacing: 0) {
+                sampleRow {
+                    Text("vadnov@mac ~ % ls -la")
+                        .foregroundColor(color(theme.foreground))
                 }
-                HStack(spacing: 0) {
-                    Text("-rw-r--r--  ").foregroundColor(color(theme.foreground))
-                    Text("1 vadnov  ").foregroundColor(color(theme.foreground))
-                    Text("staff   742 ").foregroundColor(color(theme.ansi[3]))
-                    Text("Package.swift").foregroundColor(color(theme.ansi[2]))
+                sampleRow {
+                    HStack(spacing: 0) {
+                        Text("drwxr-xr-x  ").foregroundColor(color(theme.ansi[12]))
+                        Text("4 vadnov  ").foregroundColor(color(theme.foreground))
+                        Text("staff   128 ").foregroundColor(color(theme.ansi[3]))
+                        Text("Sources").foregroundColor(color(theme.ansi[4]))
+                    }
+                }
+                sampleRow {
+                    HStack(spacing: 0) {
+                        Text("-rw-r--r--  ").foregroundColor(color(theme.foreground))
+                        Text("1 vadnov  ").foregroundColor(color(theme.foreground))
+                        Text("staff   742 ").foregroundColor(color(theme.ansi[3]))
+                        Text("Package.swift").foregroundColor(color(theme.ansi[2]))
+                    }
                 }
             }
             .font(previewFont)
