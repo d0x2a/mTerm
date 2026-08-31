@@ -14,6 +14,20 @@ struct AppearancePane: View {
         store.allThemes.filter { $0.appearance == .dark }
     }
 
+    @FocusState.Binding var focus: SettingsField?
+    @State private var fontPicker = FontPickerHandle()
+
+    /// Tab order for this pane, top to bottom as the controls are laid out.
+    /// Read by `SettingsView`, which owns the focus state and the Tab handler.
+    static let fieldOrder: [SettingsField] = [
+        .mode, .lightTheme, .darkTheme, .importTheme,
+        .fontFamily, .fontSize, .strokeWeight, .lineHeight, .blinkCursor
+    ]
+
+    init(focus: FocusState<SettingsField?>.Binding) {
+        self._focus = focus
+    }
+
     var body: some View {
         Form {
             Section("Appearance") {
@@ -23,6 +37,10 @@ struct AppearancePane: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .focusableControl(.mode, focus: $focus) { direction in
+                    stepSelection(&store.settings.appearanceMode,
+                                  in: AppearanceMode.allCases, by: direction)
+                }
             }
 
             Section("Theme") {
@@ -30,13 +48,23 @@ struct AppearancePane: View {
                        selection: $store.settings.lightThemeId) {
                     ForEach(lightThemes) { Text($0.name).tag($0.id) }
                 }
+                .focusableControl(.lightTheme, focus: $focus) { direction in
+                    stepSelection(&store.settings.lightThemeId,
+                                  in: lightThemes.map(\.id), by: direction)
+                }
                 Picker("Dark theme",
                        selection: $store.settings.darkThemeId) {
                     ForEach(darkThemes) { Text($0.name).tag($0.id) }
                 }
+                .focusableControl(.darkTheme, focus: $focus) { direction in
+                    stepSelection(&store.settings.darkThemeId,
+                                  in: darkThemes.map(\.id), by: direction)
+                }
                 HStack {
                     Spacer()
                     Button("Import theme…") { importTheme() }
+                        .focusableControl(.importTheme, focus: $focus,
+                                          onActivate: { importTheme() })
                 }
             }
 
@@ -44,38 +72,37 @@ struct AppearancePane: View {
                 LabeledContent("Family") {
                     FontFamilyPicker(selection: $store.settings.fontFamily,
                                      recommended: fonts.available,
-                                     others: fonts.others)
+                                     others: fonts.others,
+                                     handle: fontPicker)
                         .fixedSize()
+                        .focusableControl(.fontFamily, focus: $focus,
+                                          onActivate: { fontPicker.present?() })
                 }
                 Stepper(value: $store.settings.fontSize,
                         in: FontCatalog.minSize...FontCatalog.maxSize,
                         step: 1) {
                     Text("Size: \(Int(store.settings.fontSize)) pt")
                 }
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Stroke weight")
-                        Spacer()
-                        Text(String(format: "%.2f", store.settings.strokeWeight))
-                            .foregroundColor(.secondary)
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $store.settings.strokeWeight, in: 0.0...1.0)
+                .focusableControl(.fontSize, focus: $focus) { direction in
+                    let next = store.settings.fontSize + Double(direction)
+                    store.settings.fontSize =
+                        min(max(next, FontCatalog.minSize), FontCatalog.maxSize)
                 }
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Line spacing")
-                        Spacer()
-                        Text(String(format: "%.2f×", store.settings.lineHeight))
-                            .foregroundColor(.secondary)
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $store.settings.lineHeight, in: 1.0...2.0, step: 0.05)
-                }
+                AdjustableSlider(title: "Stroke weight",
+                                 value: $store.settings.strokeWeight,
+                                 range: 0.0...1.0, step: 0.05, format: "%.2f",
+                                 field: .strokeWeight, focus: $focus)
+                AdjustableSlider(title: "Line spacing",
+                                 value: $store.settings.lineHeight,
+                                 range: 1.0...2.0, step: 0.05, dragStep: 0.05,
+                                 format: "%.2f×",
+                                 field: .lineHeight, focus: $focus)
             }
 
             Section("Cursor") {
                 Toggle("Blink", isOn: $store.settings.blinkCursor)
+                    .focusableControl(.blinkCursor, focus: $focus,
+                                      onActivate: { store.settings.blinkCursor.toggle() })
             }
 
             Section("Preview") {

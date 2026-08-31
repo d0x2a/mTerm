@@ -24,12 +24,26 @@ extension FontCatalog.Entry {
 /// styled. Using a real `NSSearchField` and a real `NSTableView` means the
 /// search field, the row highlight and the keyboard handling are the system's,
 /// not an imitation of them.
+/// A stable reference the pane holds so it can trigger the font popover from
+/// the keyboard. `makeNSView` fills `present` in once the button exists.
+final class FontPickerHandle {
+    var present: (() -> Void)?
+}
+
 struct FontFamilyPicker: NSViewRepresentable {
     @Binding var selection: String
     /// Curated fonts, shown first under "Recommended".
     let recommended: [FontCatalog.Entry]
     /// Everything else installed that's monospaced, under "Other".
     let others: [FontCatalog.Entry]
+    /// Lets the pane open the popover from the keyboard.
+    ///
+    /// The obvious alternative — bridging SwiftUI's `@FocusState` into
+    /// `makeFirstResponder` on the button — strands Tab on this row: once an
+    /// AppKit view inside the hosting view is first responder, key events stop
+    /// reaching SwiftUI's focus system, so the pane's Tab handler never runs.
+    /// Focus stays entirely in SwiftUI and only the *action* crosses over.
+    var handle: FontPickerHandle?
 
     func makeNSView(context: Context) -> FontPopUpButton {
         let button = FontPopUpButton(frame: .zero, pullsDown: false)
@@ -39,6 +53,10 @@ struct FontFamilyPicker: NSViewRepresentable {
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
         button.onPress = { [weak button] in
+            guard let button else { return }
+            context.coordinator.present(from: button)
+        }
+        handle?.present = { [weak button] in
             guard let button else { return }
             context.coordinator.present(from: button)
         }
