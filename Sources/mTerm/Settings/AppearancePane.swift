@@ -74,6 +74,10 @@ struct AppearancePane: View {
                 }
             }
 
+            Section("Cursor") {
+                Toggle("Blink", isOn: $store.settings.blinkCursor)
+            }
+
             Section("Preview") {
                 ThemePreview(theme: store.current,
                              fontFamily: store.settings.fontFamily,

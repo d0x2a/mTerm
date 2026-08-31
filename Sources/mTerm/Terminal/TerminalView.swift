@@ -1282,7 +1282,13 @@ final class TerminalView: NSView, CALayerDelegate {
 
     /// 530 ms on / 530 ms off, with a 500 ms "always on" grace after the last
     /// keystroke so the cursor doesn't disappear while you're typing.
+    ///
+    /// Constant `true` when blinking is off, which does more than hold the
+    /// cursor still: the idle dirty check in `tick` treats the blink phase as
+    /// the one thing that legitimately changes on a timer, so a steady cursor
+    /// also stops the two redraws a second an otherwise idle screen was doing.
     private func cursorBlinkOn() -> Bool {
+        guard ThemeStore.shared.settings.blinkCursor else { return true }
         let elapsed = CACurrentMediaTime() - lastInputTime
         if elapsed < 0.5 { return true }
         let cyclePos = (elapsed - 0.5).truncatingRemainder(dividingBy: 1.06)

@@ -31,6 +31,10 @@ struct AppSettings: Codable, Equatable {
     /// whitespace between one row's ink and the next. Extra leading is split
     /// above and below the text.
     var lineHeight: Double = 1.15
+    /// Blink the text cursor. Off by default: a steady block is what iTerm2
+    /// and Alacritty ship, and a cursor that pulses twice a second is the one
+    /// thing on an idle screen that keeps redrawing.
+    var blinkCursor: Bool = false
     var warnOnCloseWithRunningProcess: Bool = true
 
     /// Master switch for macOS notifications. When off, bell and OSC 9/777
@@ -46,7 +50,7 @@ struct AppSettings: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case appearanceMode, lightThemeId, darkThemeId, fontFamily, fontSize,
-             strokeWeight, lineHeight, warnOnCloseWithRunningProcess,
+             strokeWeight, lineHeight, blinkCursor, warnOnCloseWithRunningProcess,
              notificationsEnabled, notifyOnBell, notifyOnlyWhenUnfocused
         /// Read-only key for migrating old settings; we never write it back.
         case thinStrokes
@@ -61,6 +65,7 @@ struct AppSettings: Codable, Equatable {
         try c.encode(fontSize, forKey: .fontSize)
         try c.encode(strokeWeight, forKey: .strokeWeight)
         try c.encode(lineHeight, forKey: .lineHeight)
+        try c.encode(blinkCursor, forKey: .blinkCursor)
         try c.encode(warnOnCloseWithRunningProcess, forKey: .warnOnCloseWithRunningProcess)
         try c.encode(notificationsEnabled, forKey: .notificationsEnabled)
         try c.encode(notifyOnBell, forKey: .notifyOnBell)
@@ -89,6 +94,9 @@ struct AppSettings: Codable, Equatable {
         // they adopt the new default rather than staying pinned to 1.0.
         self.lineHeight =
             try c.decodeIfPresent(Double.self, forKey: .lineHeight) ?? 1.15
+        // Absent from settings files written before this existed, which take
+        // the new default and stop blinking.
+        self.blinkCursor = try c.decodeIfPresent(Bool.self, forKey: .blinkCursor) ?? false
         self.warnOnCloseWithRunningProcess =
             try c.decodeIfPresent(Bool.self, forKey: .warnOnCloseWithRunningProcess) ?? true
         self.notificationsEnabled =
