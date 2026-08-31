@@ -210,6 +210,28 @@ enum ShellIntegration {
         zshexit_functions+=(__mterm_hist_flush)
     fi
 
+    # OSC 7 (cwd reporting). Nothing else emits it under mTerm —
+    # /etc/zshrc_Apple_Terminal is gated on TERM_PROGRAM=Apple_Terminal — and
+    # without it the terminal has no anchor for the relative file paths in
+    # command output, so a `src/main.swift` in a compiler error can't be
+    # resolved and never lights up as a link. Percent-encoding follows
+    # Apple's: byte-by-byte under LC_CTYPE=C, so a path with a space or
+    # non-ASCII in it still produces a parseable URL.
+    __mterm_osc7() {
+        local url_path='' i ch hexch
+        local LC_CTYPE=C LC_COLLATE=C LC_ALL= LANG=
+        for ((i = 1; i <= ${#PWD}; ++i)); do
+            ch="$PWD[i]"
+            if [[ "$ch" =~ [/._~A-Za-z0-9-] ]]; then
+                url_path+="$ch"
+            else
+                printf -v hexch "%02X" "'$ch"
+                url_path+="%$hexch"
+            fi
+        done
+        printf '\033]7;file://%s%s\007' "$HOST" "$url_path"
+    }
+
     # OSC 133 (FinalTerm) semantic prompt markers:
     #   precmd  → D (exit code of last command) + A (new prompt starting)
     #   PROMPT  → ... B (end of prompt, command input starts)
@@ -217,6 +239,7 @@ enum ShellIntegration {
     __mterm_precmd() {
         local exit=$?
         printf '\033]133;D;%d\007\033]133;A\007' $exit
+        __mterm_osc7
     }
     __mterm_preexec() {
         printf '\033]133;C\007'

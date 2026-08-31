@@ -59,6 +59,11 @@ struct TerminalSnapshot {
     /// row of `cells`. Always 0 for a scrolled-back viewport, which is composed
     /// in logical order. Use `rowStart(_:)` rather than reading this directly.
     let rowOffset: Int
+    /// Per viewport row: did this row run out of width and continue onto the
+    /// next one? Always in viewport order, unlike `cells`, which is a ring.
+    /// Lets a consumer rebuild the logical line a wrapped row belongs to —
+    /// a URL split across two rows is one URL, not two fragments.
+    let rowWrapped: [Bool]
     let cursorCol: Int
     let cursorRow: Int
     let cursorVisible: Bool
@@ -404,6 +409,7 @@ final class TerminalState: ParserSink {
                 cols: cols, rows: rows,
                 cells: cells,
                 rowOffset: rowOffset,
+                rowWrapped: (0..<rows).map { rowWrapped[ringRow($0)] },
                 cursorCol: cursorCol, cursorRow: cursorRow,
                 cursorVisible: cursorVisible,
                 scrollbackLines: scrollbackCount,
@@ -418,6 +424,8 @@ final class TerminalState: ParserSink {
 
         var viewport = [Cell]()
         viewport.reserveCapacity(cols * rows)
+        var wrapped = [Bool]()
+        wrapped.reserveCapacity(rows)
 
         // Scrollback rows: the offset most-recent rows are pushed UP off-screen,
         // so the rows we want are scrollback[count-offset ..< count] at the top
@@ -432,6 +440,7 @@ final class TerminalState: ParserSink {
             for c in 0..<cols {
                 viewport.append(c < row.count ? row[c] : padding)
             }
+            wrapped.append(scrollbackWrapped[scrollbackSlot(firstScrollbackIdx + i)])
         }
 
         // Grid rows: fill the rest of the viewport from the top of the active grid.
@@ -440,6 +449,7 @@ final class TerminalState: ParserSink {
             for c in 0..<cols {
                 viewport.append(cells[rowBase(r) + c])
             }
+            wrapped.append(rowWrapped[ringRow(r)])
         }
 
         // Cursor: only show when scrolled to the bottom; otherwise hide.
@@ -447,6 +457,7 @@ final class TerminalState: ParserSink {
             cols: cols, rows: rows,
             cells: viewport,
             rowOffset: 0,          // composed in logical order already
+            rowWrapped: wrapped,
             cursorCol: cursorCol, cursorRow: cursorRow,
             cursorVisible: false,
             scrollbackLines: scrollbackCount,

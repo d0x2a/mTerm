@@ -94,6 +94,15 @@ final class TerminalView: NSView, CALayerDelegate {
     private let triggerEvaluator = TriggerEvaluator()
     private var currentTriggerMatches: [TriggerMatch] = []
     private var commandHeld: Bool = false
+    private var pathExistsCache: [String: Bool] = [:]
+    private var pathCacheStamp: CFTimeInterval = 0
+    private static let pathCacheTTL: CFTimeInterval = 2.0
+    /// Memo for evaluateTriggers. Kept separate from currentTriggerMatches,
+    /// which is cleared whenever ⌘ comes up — reusing that as the memo would
+    /// hand back an empty result the next time ⌘ went down on an unchanged
+    /// screen.
+    private var memoedFingerprint: Int? = nil
+    private var memoedTriggerMatches: [TriggerMatch] = []
     private var lastMouseCoord: (col: Int, row: Int)? = nil
     /// Last pointer location in window coordinates, used to detect when the
     /// pointer is over the split-view divider's grab zone (which overlaps our
@@ -401,9 +410,131 @@ final class TerminalView: NSView, CALayerDelegate {
             currentTriggerMatches = []
             return
         }
-        currentTriggerMatches = triggerEvaluator.evaluate(
+        currentTriggerMatches = evaluateTriggers(
             snapshot: session.snapshot(scrollOffset: scrollOffset)
         )
+    }
+
+    /// Runs the triggers, then drops every file-path match that doesn't name
+    /// something on disk. The path regex is deliberately loose — `and/or` and
+    /// `w/e` match it — so this is what stands between "file paths are
+    /// clickable" and every slash on screen becoming a click target. It also
+    /// means ⌘-click can't miss: anything the pointer offers is known to
+    /// exist.
+    private func evaluateTriggers(snapshot: TerminalSnapshot) -> [TriggerMatch] {
+        // Expire the stat cache on a fixed cadence, and force a re-evaluation
+        // when it goes: a path that appeared or vanished while ⌘ was held
+        // doesn't change a single cell, so the fingerprint below can't see it.
+        let now = CACurrentMediaTime()
+        var expired = false
+        if now - pathCacheStamp > Self.pathCacheTTL {
+            pathExistsCache.removeAll(keepingCapacity: true)
+            pathCacheStamp = now
+            expired = true
+        }
+
+        // Holding ⌘ and moving the pointer marks a frame dirty on every mouse
+        // event, so without this the regexes re-run over identical text 60
+        // times a second — 1.5 ms a frame on a large window. Fingerprinting
+        // exactly what the evaluator reads costs ~2% of that.
+        let fingerprint = triggerFingerprint(snapshot)
+        if !expired, fingerprint == memoedFingerprint {
+            return memoedTriggerMatches
+        }
+
+        let matches = triggerEvaluator.evaluate(snapshot: snapshot)
+        let cwd = snapshot.currentDirectory
+        let filtered = matches.filter { m in
+            guard m.trigger.clickAction == .revealFile else { return true }
+            guard let path = resolveFilePath(m.text, cwd: cwd) else { return false }
+            return pathExists(path)
+        }
+        memoedFingerprint = fingerprint
+        memoedTriggerMatches = filtered
+        return filtered
+    }
+
+    /// Everything TriggerEvaluator looks at: the geometry, where the viewport
+    /// sits, the cwd relative paths resolve against, and every cell's scalar.
+    /// Colors and attributes are deliberately absent — a line that only
+    /// changed color has the same links.
+    private func triggerFingerprint(_ s: TerminalSnapshot) -> Int {
+        var hasher = Hasher()
+        hasher.combine(s.cols)
+        hasher.combine(s.rows)
+        hasher.combine(s.rowOffset)
+        // Wrap flags decide how rows are joined into logical lines, so two
+        // screens with identical cells but different wrapping do not have
+        // identical links.
+        hasher.combine(s.rowWrapped)
+        hasher.combine(s.scrolledRows)
+        hasher.combine(s.scrollOffset)
+        hasher.combine(s.currentDirectory)
+        s.cells.withUnsafeBufferPointer { cells in
+            for cell in cells { hasher.combine(cell.scalar.value) }
+        }
+        return hasher.finalize()
+    }
+
+    /// Cached stat(), so holding ⌘ over a screen of `find` output doesn't
+    /// re-stat every hit. evaluateTriggers owns the expiry.
+    private func pathExists(_ path: String) -> Bool {
+        if let known = pathExistsCache[path] { return known }
+        let exists = FileManager.default.fileExists(atPath: path)
+        pathExistsCache[path] = exists
+        return exists
+    }
+
+    /// Gives a schemeless match the scheme it needs to be openable.
+    ///
+    /// `URL(string:).scheme` can't be used to spot one: RFC 3986 allows dots
+    /// in a scheme, so Foundation reads `code.d0x2a.com:8080/x` as the scheme
+    /// "code.d0x2a.com" and `localhost:3000` as "localhost", and NSWorkspace
+    /// then quietly fails to open either. A colon followed by digits is a
+    /// port, not a scheme.
+    ///
+    /// Bare `localhost` and bare IPv4 get http — that's what a dev server on
+    /// a port is. Everything else gets https, including Traefik-style
+    /// `<service>.docker.localhost`, which is served over TLS.
+    private func openableURL(_ text: String) -> URL? {
+        if text.contains("://")
+            || text.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*:(?![\d/])"#,
+                          options: .regularExpression) != nil {
+            return URL(string: text)
+        }
+        let isLoopback = text.range(
+            of: #"^(?:localhost|\d{1,3}(?:\.\d{1,3}){3})(?:[:/]|$)"#,
+            options: .regularExpression
+        ) != nil
+        return URL(string: (isLoopback ? "http://" : "https://") + text)
+    }
+
+    /// Resolves a matched path to something absolute, or nil when it can't be
+    /// — a relative path with no OSC 7 cwd to anchor it has no meaning, so it
+    /// stops being a link rather than guessing at the process's own cwd.
+    /// A trailing `:line[:col]` from compiler or grep output is trimmed first;
+    /// it's carried in the match so hovering marks the whole reference.
+    private func resolveFilePath(_ text: String, cwd: String?) -> String? {
+        var p = text
+        while let r = p.range(of: #":\d+$"#, options: .regularExpression) {
+            p.removeSubrange(r)
+        }
+        guard !p.isEmpty else { return nil }
+        if p.hasPrefix("~") {
+            p = (p as NSString).expandingTildeInPath
+        } else if !p.hasPrefix("/") {
+            guard let cwd else { return nil }
+            p = (cwd as NSString).appendingPathComponent(p)
+        }
+        return (p as NSString).standardizingPath
+    }
+
+    /// The match the pointer is currently inside, if any. Nil once the
+    /// pointer leaves the view — mouseExited clears lastMouseCoord, so the
+    /// underline can't be left behind on a link nobody is pointing at.
+    private func hoveredTriggerMatch() -> TriggerMatch? {
+        guard let coord = lastMouseCoord else { return nil }
+        return triggerMatch(at: coord)
     }
 
     private func triggerMatch(at coord: (col: Int, row: Int)) -> TriggerMatch? {
@@ -418,12 +549,19 @@ final class TerminalView: NSView, CALayerDelegate {
         guard let action = match.trigger.clickAction else { return }
         switch action {
         case .openURL:
-            if let url = URL(string: match.text) {
+            if let url = openableURL(match.text) {
                 NSWorkspace.shared.open(url)
             }
-        case .openFile:
-            let url = resolveFileURL(match.text)
-            NSWorkspace.shared.open(url)
+        case .revealFile:
+            guard let path = resolveFilePath(match.text,
+                                             cwd: session?.currentDirectory)
+            else { return }
+            // Reveal rather than open: the match was offered because it
+            // exists, and selecting it in Finder can't run anything by
+            // accident.
+            NSWorkspace.shared.activateFileViewerSelecting(
+                [URL(fileURLWithPath: path)]
+            )
         case .runCommand(let template):
             // Substitute $1 with the matched text, append \r so the shell
             // actually executes it.
@@ -431,17 +569,6 @@ final class TerminalView: NSView, CALayerDelegate {
             cmd.append("\r")
             session?.write(Array(cmd.utf8))
         }
-    }
-
-    private func resolveFileURL(_ path: String) -> URL {
-        var p = path
-        if p.hasPrefix("~") {
-            p = (p as NSString).expandingTildeInPath
-        }
-        if !p.hasPrefix("/"), let cwd = session?.currentDirectory {
-            p = (cwd as NSString).appendingPathComponent(p)
-        }
-        return URL(fileURLWithPath: p)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -517,8 +644,7 @@ final class TerminalView: NSView, CALayerDelegate {
             return
         }
         if commandHeld,
-           let coord = lastMouseCoord,
-           let match = triggerMatch(at: coord),
+           let match = hoveredTriggerMatch(),
            match.trigger.clickAction != nil {
             NSCursor.pointingHand.set()
         } else {
@@ -1029,6 +1155,7 @@ final class TerminalView: NSView, CALayerDelegate {
         guard let metalLayer = layer as? CAMetalLayer, let renderer else { return }
         let snapshot = session?.snapshot(scrollOffset: scrollOffset)
             ?? TerminalSnapshot(cols: 1, rows: 1, cells: [Cell()], rowOffset: 0,
+                                rowWrapped: [false],
                                 cursorCol: 0, cursorRow: 0, cursorVisible: false,
                                 scrollbackLines: 0, scrollOffset: 0, title: "",
                                 prompts: [], scrolledRows: 0, currentDirectory: nil,
@@ -1060,13 +1187,13 @@ final class TerminalView: NSView, CALayerDelegate {
                                    foregroundProcess: fgProcess)
         }
         // Trigger matches are only ever read while ⌘ is held — ⌘-click, the
-        // pointing-hand affordance, and the highlight bands all gate on it — so
-        // evaluating on every frame spent a quarter-millisecond of the keystroke
-        // path building a string per row and running regexes over them, only to
-        // throw the answer away. Cleared rather than stale when ⌘ is up, so
+        // pointing-hand affordance and the hover marking all gate on it — so
+        // evaluating on every frame spent a fraction of a millisecond of the
+        // keystroke path building strings and running regexes over them, only
+        // to throw the answer away. Cleared rather than stale when ⌘ is up, so
         // nothing can read matches that describe a screen we've since redrawn.
         currentTriggerMatches = commandHeld
-            ? triggerEvaluator.evaluate(snapshot: snapshot)
+            ? evaluateTriggers(snapshot: snapshot)
             : []
 
         let focused = window?.isKeyWindow ?? false
@@ -1091,9 +1218,11 @@ final class TerminalView: NSView, CALayerDelegate {
             for m in currentTriggerMatches {
                 let style: HighlightStyle
                 switch m.trigger.style {
+                case .none:       continue        // clickable, but never drawn
                 case .background: style = .background
                 case .underline:  style = .underline
                 case .both:       style = .both
+                case .text:       style = .text
                 }
                 bands.append(HighlightBand(
                     col: m.viewportCol,
@@ -1102,6 +1231,31 @@ final class TerminalView: NSView, CALayerDelegate {
                     color: m.trigger.color,
                     style: style
                 ))
+            }
+
+            // The link under the pointer is marked whatever its trigger's own
+            // style is: this isn't decoration, it's showing which run of text
+            // ⌘-click is about to act on. Every segment sharing the hovered
+            // match's id is drawn, so a URL that wrapped is marked across all
+            // its rows rather than only the one being pointed at — the extent
+            // of the marking is the extent of what opens.
+            if let hovered = hoveredTriggerMatch(), hovered.trigger.clickAction != nil {
+                let accent = ThemeStore.currentTheme.linkAccent
+                for m in currentTriggerMatches where m.id == hovered.id {
+                    // Text and rule in the same colour, so the link reads as
+                    // one object rather than as text with something drawn
+                    // under it. Two bands rather than one combined style:
+                    // they're independent effects and compose in the renderer.
+                    for style in [HighlightStyle.underline, .text] {
+                        bands.append(HighlightBand(
+                            col: m.viewportCol,
+                            row: m.viewportRow,
+                            length: m.length,
+                            color: accent,
+                            style: style
+                        ))
+                    }
+                }
             }
         }
 

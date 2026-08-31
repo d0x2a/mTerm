@@ -39,6 +39,10 @@ enum HighlightStyle {
     case background    // full-cell tint behind the glyph
     case underline     // thin line at the bottom of the cell
     case both          // tint + underline
+    /// Recolour the glyphs and draw nothing. Paired with `.underline` for the
+    /// link under the pointer, so the text and the rule beneath it read as
+    /// one object. Adds no geometry, so nothing shifts when it appears.
+    case text
 }
 
 /// A colored band the renderer paints between the cell background and the
@@ -107,6 +111,9 @@ final class Renderer {
     /// pure overhead in the keystroke path.
     private var flatScratch: [FlatInstance] = []
     private var glyphScratch: [CellInstance] = []
+    /// Per-cell glyph-colour overrides for `.text` highlight bands, viewport
+    /// indexed (`row * cols + col`). 0 means "no override".
+    private var textColorScratch: [UInt32] = []
 
     init(device: MTLDevice, pixelFormat: MTLPixelFormat, scale: CGFloat,
          fontFamily: String = FontCatalog.defaultFamily,
@@ -260,25 +267,53 @@ final class Renderer {
                     size: SIMD2<Float>(w, cellHeight),
                     color: h.color
                 ))
-            case .underline:
+            case .underline, .text:
                 break
             }
             switch h.style {
             case .underline, .both:
-                // Underline color uses the band's RGB but at full opacity, so
-                // the line stays visible even when the tint alpha is low.
-                let underlineColor = SIMD4<Float>(h.color.x, h.color.y, h.color.z, 1.0)
+                // The band's alpha is honored rather than forced to 1.0, so
+                // a caller can ask for a hairline. `.background` already
+                // works that way; an underline that silently ignored alpha
+                // made the same colour mean two different things.
                 flatScratch.append(FlatInstance(
                     pos: SIMD2<Float>(x, y + underlineTop),
                     size: SIMD2<Float>(w, underlineThickness),
-                    color: underlineColor
+                    color: h.color
                 ))
-            case .background:
+            case .background, .text:
                 break
             }
         }
 
         let cols = snapshot.cols
+
+        // `.text` bands recolour glyphs rather than drawing a quad, so they
+        // have to reach the cell loop as a per-cell lookup. Refilled each
+        // frame into a kept buffer, and skipped entirely when nothing asks
+        // for it — which is every frame the pointer isn't on a link.
+        var recolorsText = false
+        for h in highlights where h.style == .text { recolorsText = true; break }
+        if recolorsText {
+            let needed = snapshot.rows * cols
+            if textColorScratch.count < needed {
+                textColorScratch = [UInt32](repeating: 0, count: needed)
+            } else {
+                for i in 0..<needed { textColorScratch[i] = 0 }
+            }
+            for h in highlights where h.style == .text {
+                guard h.row >= 0, h.row < snapshot.rows else { continue }
+                let start = max(0, h.col)
+                let end = min(h.col + h.length, cols)
+                guard start < end else { continue }
+                // Alpha stays in the packed value: 0 is the "no override"
+                // sentinel, and an opaque colour can never pack to 0.
+                let packed = PackedColor(h.color).value
+                let base = h.row * cols
+                for c in start..<end { textColorScratch[base + c] = packed }
+            }
+        }
+
         // One bounds-checked subscript per cell adds up at ~10k cells a frame.
         snapshot.cells.withUnsafeBufferPointer { cells in
             for row in 0..<snapshot.rows {
@@ -337,6 +372,13 @@ final class Renderer {
                     // The one place a cell colour still needs float maths.
                     if cell.attrs.contains(.faint) {
                         glyphFg = PackedColor(mix(glyphFg.simd, cell.bg.simd, t: 0.5))
+                    }
+                    // Link recolour, applied after faint so a hovered link
+                    // inside dimmed output is still legible, and skipped under
+                    // the cursor so the inverted block keeps its contrast.
+                    if recolorsText && !invertGlyph {
+                        let override = textColorScratch[row * cols + col]
+                        if override != 0 { glyphFg = PackedColor(override) }
                     }
                     glyphScratch.append(CellInstance(
                         glyphPos: glyphPos,

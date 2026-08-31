@@ -48,6 +48,17 @@ struct Theme: Identifiable, Equatable {
     let selection: SIMD4<Float>
     let ansi: [SIMD4<Float>]    // 16 entries: 0-7 normal, 8-15 bright
 
+    /// Colour the link under the pointer takes — both its text and the
+    /// underline beneath it, so the two read as one object. Taken from the
+    /// palette so it tracks the theme: measured across the bundled
+    /// themes, `ansi[4]` runs 3.4:1–7.5:1 against the background and is
+    /// visibly off the foreground on every one. `ansi[12]` scores better on
+    /// contrast alone and is the wrong pick — Solarized puts a grey there,
+    /// identical to Solarized Dark's own foreground.
+    var linkAccent: SIMD4<Float> {
+        ansi.indices.contains(4) ? ansi[4] : foreground
+    }
+
     static func rgb(_ hex: UInt32, alpha: Float = 1.0) -> SIMD4<Float> {
         let r = Float((hex >> 16) & 0xFF) / 255.0
         let g = Float((hex >> 8)  & 0xFF) / 255.0
