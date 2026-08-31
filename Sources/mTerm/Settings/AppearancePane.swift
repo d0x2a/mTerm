@@ -43,7 +43,8 @@ struct AppearancePane: View {
             Section("Font") {
                 LabeledContent("Family") {
                     FontFamilyPicker(selection: $store.settings.fontFamily,
-                                     entries: fonts.available)
+                                     recommended: fonts.available,
+                                     others: fonts.others)
                         .fixedSize()
                 }
                 Stepper(value: $store.settings.fontSize,
@@ -74,7 +75,10 @@ struct AppearancePane: View {
             }
 
             Section("Preview") {
-                ThemePreview(theme: store.current)
+                ThemePreview(theme: store.current,
+                             fontFamily: store.settings.fontFamily,
+                             fontSize: store.settings.fontSize,
+                             lineHeight: store.settings.lineHeight)
             }
         }
         .formStyle(.grouped)
@@ -112,6 +116,27 @@ struct AppearancePane: View {
 
 private struct ThemePreview: View {
     let theme: Theme
+    let fontFamily: String
+    let fontSize: Double
+    let lineHeight: Double
+
+    /// Resolved through the same `makeFont` the renderer uses, so the preview
+    /// can't disagree with what the terminal will actually draw — including
+    /// which face a font from the "Other" section resolves to, and the
+    /// fallback when the chosen font has been uninstalled.
+    ///
+    /// Scale 1: `makeFont` works in device pixels for the renderer, and this
+    /// is laid out in points.
+    private var previewFont: Font {
+        Font(FontCatalog.makeFont(family: fontFamily, size: fontSize, scale: 1))
+    }
+
+    /// mTerm's line height is a multiplier on the cell. These rows are
+    /// separate views, so the extra leading has to be stack spacing rather
+    /// than `.lineSpacing`, which only applies within one Text.
+    private var extraLeading: CGFloat {
+        CGFloat(fontSize * (lineHeight - 1))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -122,7 +147,7 @@ private struct ThemePreview: View {
                 ForEach(8..<16, id: \.self) { i in swatch(theme.ansi[i]) }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: extraLeading) {
                 Text("vadnov@mac ~ % ls -la")
                     .foregroundColor(color(theme.foreground))
                 HStack(spacing: 0) {
@@ -138,7 +163,10 @@ private struct ThemePreview: View {
                     Text("Package.swift").foregroundColor(color(theme.ansi[2]))
                 }
             }
-            .font(.system(.body, design: .monospaced))
+            .font(previewFont)
+            // A 28 pt font would otherwise wrap these lines and make the
+            // preview taller than the pane it's previewing.
+            .lineLimit(1)
             .padding(12)
             .background(color(theme.background))
             .cornerRadius(6)

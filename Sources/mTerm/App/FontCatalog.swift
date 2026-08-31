@@ -30,7 +30,26 @@ enum FontCatalog {
         Entry(displayName: "Inconsolata",    postScriptName: "Inconsolata-Regular"),
     ]
 
-    /// Filtered to entries actually installed. SF Mono is always present.
+    /// Every monospaced family installed that isn't already curated — the
+    /// "Other" half of the picker. Curation is about which fonts are *good*
+    /// in a terminal, not which are usable, so nothing installed should be
+    /// unreachable; this is what keeps the list honest without promoting the
+    /// CJK faces that are technically fixed-pitch but poor to read code in.
+    ///
+    /// The scan costs ~1.4 ms across ~260 families, so it runs on the way
+    /// into Settings rather than being cached for the process — a font
+    /// installed mid-session then needs no special handling.
+    static var discovered: [Entry] {
+        let known = Set(curated.map(\.displayName))
+        return NSFontManager.shared.availableFontFamilies
+            .filter { !known.contains($0) && NSFont(name: $0, size: 12)?.isFixedPitch == true }
+            .sorted()
+            // A family name is itself a usable font name for these, which is
+            // what lets `makeFont` resolve one without enumerating fonts.
+            .map { Entry(displayName: $0, postScriptName: $0) }
+    }
+
+    /// Curated entries actually installed. SF Mono is always present.
     static var available: [Entry] {
         curated.filter { entry in
             if entry.displayName == defaultFamily { return true }
@@ -48,6 +67,12 @@ enum FontCatalog {
         if let entry = curated.first(where: { $0.displayName == family }),
            !entry.postScriptName.isEmpty,
            let f = NSFont(name: entry.postScriptName, size: pixelSize) {
+            return f
+        }
+        // A font from the "Other" section, whose display name is its family
+        // name. Tried directly rather than by searching `discovered`, so the
+        // render path never enumerates the installed fonts.
+        if let f = NSFont(name: family, size: pixelSize) {
             return f
         }
         return NSFont.monospacedSystemFont(ofSize: pixelSize, weight: .regular)
@@ -75,15 +100,19 @@ final class FontCatalogStore: ObservableObject {
     static let shared = FontCatalogStore()
 
     @Published private(set) var available: [FontCatalog.Entry] = FontCatalog.available
+    /// Installed monospaced fonts outside the curated list.
+    @Published private(set) var others: [FontCatalog.Entry] = FontCatalog.discovered
 
     private init() {}
 
-    /// Re-reads the installed set. A handful of `NSFont(name:)` lookups, only
-    /// on the way into Settings. Silent when nothing changed, so the common
-    /// case doesn't invalidate the pane's body.
+    /// Re-reads both halves of the list: a handful of `NSFont(name:)` lookups
+    /// for the curated entries plus the ~1.4 ms scan behind `discovered`.
+    /// Only on the way into Settings, and silent when nothing changed, so the
+    /// common case doesn't invalidate the pane's body.
     func refresh() {
-        let current = FontCatalog.available
-        guard current != available else { return }
-        available = current
+        let recommended = FontCatalog.available
+        let rest = FontCatalog.discovered
+        if recommended != available { available = recommended }
+        if rest != others { others = rest }
     }
 }

@@ -26,7 +26,10 @@ extension FontCatalog.Entry {
 /// not an imitation of them.
 struct FontFamilyPicker: NSViewRepresentable {
     @Binding var selection: String
-    let entries: [FontCatalog.Entry]
+    /// Curated fonts, shown first under "Recommended".
+    let recommended: [FontCatalog.Entry]
+    /// Everything else installed that's monospaced, under "Other".
+    let others: [FontCatalog.Entry]
 
     func makeNSView(context: Context) -> FontPopUpButton {
         let button = FontPopUpButton(frame: .zero, pullsDown: false)
@@ -49,7 +52,7 @@ struct FontFamilyPicker: NSViewRepresentable {
         // exactly one item: the menu is never dropped, the popover is.
         let menu = NSMenu()
         let item = NSMenuItem(title: selection, action: nil, keyEquivalent: "")
-        if let entry = entries.first(where: { $0.displayName == selection }) {
+        if let entry = (recommended + others).first(where: { $0.displayName == selection }) {
             item.attributedTitle = NSAttributedString(
                 string: selection,
                 attributes: [.font: entry.previewFont(size: NSFont.systemFontSize)])
@@ -78,7 +81,8 @@ struct FontFamilyPicker: NSViewRepresentable {
         func present(from button: NSView) {
             if let open = popover, open.isShown { open.close(); popover = nil; return }
             let controller = FontListViewController(
-                entries: parent.entries,
+                recommended: parent.recommended,
+                others: parent.others,
                 selection: parent.selection,
                 onPick: { [weak self] name in
                     self?.parent.selection = name
@@ -118,28 +122,69 @@ final class FontPopUpButton: NSPopUpButton {
 final class FontListViewController: NSViewController,
                                     NSTableViewDataSource, NSTableViewDelegate,
                                     NSSearchFieldDelegate {
-    private let entries: [FontCatalog.Entry]
+    /// A visible line: either a section heading or a selectable font.
+    private enum Row {
+        case header(String)
+        case font(FontCatalog.Entry)
+    }
+
+    private let recommended: [FontCatalog.Entry]
+    private let others: [FontCatalog.Entry]
     private let selection: String
     private let onPick: (String) -> Void
     private let onCancel: () -> Void
 
-    private var filtered: [FontCatalog.Entry]
+    private var rows: [Row]
     private let searchField = NSSearchField()
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
 
     private static let rowHeight: CGFloat = 24
+    private static let headerHeight: CGFloat = 22
     private static let width: CGFloat = 260
     private static let maxListHeight: CGFloat = 320
 
-    init(entries: [FontCatalog.Entry], selection: String,
+    init(recommended: [FontCatalog.Entry], others: [FontCatalog.Entry],
+         selection: String,
          onPick: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
-        self.entries = entries
+        self.recommended = recommended
+        self.others = others
         self.selection = selection
-        self.filtered = entries
         self.onPick = onPick
         self.onCancel = onCancel
+        self.rows = Self.rows(recommended: recommended, others: others, query: "")
         super.init(nibName: nil, bundle: nil)
+    }
+
+    /// Splits the matches into sections. A heading is only drawn when both
+    /// sections have something in them — filtering down to one section makes
+    /// its heading redundant, and a lone header over a short list reads worse
+    /// than no header at all.
+    private static func rows(recommended: [FontCatalog.Entry],
+                             others: [FontCatalog.Entry],
+                             query: String) -> [Row] {
+        func matching(_ list: [FontCatalog.Entry]) -> [FontCatalog.Entry] {
+            query.isEmpty
+                ? list
+                : list.filter { $0.displayName.localizedCaseInsensitiveContains(query) }
+        }
+        let top = matching(recommended), rest = matching(others)
+        let headings = !top.isEmpty && !rest.isEmpty
+        var out: [Row] = []
+        if !top.isEmpty {
+            if headings { out.append(.header("Recommended")) }
+            out.append(contentsOf: top.map(Row.font))
+        }
+        if !rest.isEmpty {
+            if headings { out.append(.header("Other")) }
+            out.append(contentsOf: rest.map(Row.font))
+        }
+        return out
+    }
+
+    private func entry(at row: Int) -> FontCatalog.Entry? {
+        guard row >= 0, row < rows.count, case .font(let e) = rows[row] else { return nil }
+        return e
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -172,8 +217,7 @@ final class FontListViewController: NSViewController,
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
 
-        let listHeight = min(CGFloat(max(filtered.count, 1)) * Self.rowHeight + 8,
-                             Self.maxListHeight)
+        let listHeight = min(max(contentHeight(), Self.rowHeight) + 8, Self.maxListHeight)
         NSLayoutConstraint.activate([
             searchField.topAnchor.constraint(equalTo: container.topAnchor, constant: 7),
             searchField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 7),
@@ -190,12 +234,22 @@ final class FontListViewController: NSViewController,
         selectRow(forName: selection)
     }
 
+    private func contentHeight() -> CGFloat {
+        rows.reduce(0) { total, row in
+            if case .header = row { return total + Self.headerHeight }
+            return total + Self.rowHeight
+        }
+    }
+
     func focusSearchField() {
         view.window?.makeFirstResponder(searchField)
     }
 
     private func selectRow(forName name: String) {
-        guard let idx = filtered.firstIndex(where: { $0.displayName == name }) else {
+        guard let idx = rows.firstIndex(where: {
+            if case .font(let e) = $0 { return e.displayName == name }
+            return false
+        }) else {
             tableView.deselectAll(nil)
             return
         }
@@ -203,43 +257,54 @@ final class FontListViewController: NSViewController,
         tableView.scrollRowToVisible(idx)
     }
 
+    private func selectFirstFont() {
+        guard let idx = rows.firstIndex(where: { if case .font = $0 { return true }; return false })
+        else { tableView.deselectAll(nil); return }
+        tableView.selectRowIndexes([idx], byExtendingSelection: false)
+        tableView.scrollRowToVisible(idx)
+    }
+
     @objc private func rowClicked() {
-        let row = tableView.clickedRow
-        guard row >= 0, row < filtered.count else { return }
-        onPick(filtered[row].displayName)
+        guard let e = entry(at: tableView.clickedRow) else { return }
+        onPick(e.displayName)
     }
 
     private func commitSelection() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < filtered.count else { return }
-        onPick(filtered[row].displayName)
+        guard let e = entry(at: tableView.selectedRow) else { return }
+        onPick(e.displayName)
     }
 
+    /// Steps to the next selectable row, stepping over section headings so
+    /// the arrow keys never land the highlight on one.
     private func move(by delta: Int) {
-        guard !filtered.isEmpty else { return }
-        let current = tableView.selectedRow
-        let next = current < 0
-            ? (delta > 0 ? 0 : filtered.count - 1)
-            : min(max(current + delta, 0), filtered.count - 1)
-        tableView.selectRowIndexes([next], byExtendingSelection: false)
-        tableView.scrollRowToVisible(next)
+        var next = tableView.selectedRow
+        if next < 0 { next = delta > 0 ? -1 : rows.count }
+        var candidate = next + delta
+        while candidate >= 0 && candidate < rows.count {
+            if entry(at: candidate) != nil {
+                tableView.selectRowIndexes([candidate], byExtendingSelection: false)
+                tableView.scrollRowToVisible(candidate)
+                return
+            }
+            candidate += delta
+        }
     }
 
     // MARK: search
 
     func controlTextDidChange(_ obj: Notification) {
         let query = searchField.stringValue.trimmingCharacters(in: .whitespaces)
-        filtered = query.isEmpty
-            ? entries
-            : entries.filter { $0.displayName.localizedCaseInsensitiveContains(query) }
+        rows = Self.rows(recommended: recommended, others: others, query: query)
         tableView.reloadData()
         // Keep the current font selected while it still matches; otherwise put
         // the highlight on the first hit so Return picks the obvious thing.
-        if filtered.contains(where: { $0.displayName == selection }) {
+        if rows.contains(where: {
+            if case .font(let e) = $0 { return e.displayName == selection }
+            return false
+        }) {
             selectRow(forName: selection)
-        } else if !filtered.isEmpty {
-            tableView.selectRowIndexes([0], byExtendingSelection: false)
-            tableView.scrollRowToVisible(0)
+        } else {
+            selectFirstFont()
         }
     }
 
@@ -258,16 +323,64 @@ final class FontListViewController: NSViewController,
 
     // MARK: table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        if case .header = rows[row] { return true }
+        return false
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        entry(at: row) != nil
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if case .header = rows[row] { return Self.headerHeight }
+        return Self.rowHeight
+    }
 
     func tableView(_ tableView: NSTableView,
                    viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("fontCell")
-        let cell = (tableView.makeView(withIdentifier: id, owner: nil) as? FontCellView)
-            ?? FontCellView(identifier: id)
-        cell.configure(name: filtered[row].displayName,
-                       font: filtered[row].previewFont(size: 13))
-        return cell
+        switch rows[row] {
+        case .header(let title):
+            let id = NSUserInterfaceItemIdentifier("headerCell")
+            let cell = (tableView.makeView(withIdentifier: id, owner: nil) as? SectionHeaderView)
+                ?? SectionHeaderView(identifier: id)
+            cell.configure(title: title)
+            return cell
+        case .font(let entry):
+            let id = NSUserInterfaceItemIdentifier("fontCell")
+            let cell = (tableView.makeView(withIdentifier: id, owner: nil) as? FontCellView)
+                ?? FontCellView(identifier: id)
+            cell.configure(name: entry.displayName, font: entry.previewFont(size: 13))
+            return cell
+        }
+    }
+}
+
+/// "Recommended" / "Other" heading. A plain label rather than the table's own
+/// group-row styling, which is built for source lists and draws far heavier
+/// than a short popover wants.
+private final class SectionHeaderView: NSTableCellView {
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        let label = NSTextField(labelWithString: "")
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        addSubview(label)
+        textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func configure(title: String) {
+        textField?.stringValue = title.uppercased()
     }
 }
 
