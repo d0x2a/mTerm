@@ -22,9 +22,15 @@ It is **not** trying to be Warp. No AI features, no command palettes that rethin
 
 ## Install
 
-### Signed DMG (recommended)
+### Homebrew (recommended)
 
-Grab the latest `.dmg` from [Releases](https://github.com/d0x2a/mTerm/releases), drag mTerm.app to `/Applications`. The DMG is signed with a Developer ID and notarized by Apple, so Gatekeeper will accept it on first launch.
+```bash
+brew install --cask d0x2a/tap/mterm
+```
+
+### Signed DMG
+
+Grab the latest `.dmg` from [Releases](https://github.com/d0x2a/mTerm/releases), drag mTerm.app to `/Applications`. The DMG is a universal binary, signed with a Developer ID and notarized by Apple, so Gatekeeper will accept it on first launch.
 
 ### Build from source
 
