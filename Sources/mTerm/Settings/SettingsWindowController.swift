@@ -41,6 +41,18 @@ final class SettingsWindowController: NSWindowController {
         ) { _ in FontCatalogStore.shared.refresh() }
     }
 
+    /// Closes the Settings window if it's on screen, leaving it alone if it was
+    /// never opened.
+    ///
+    /// Deliberately goes through `NSApp.windows` rather than `shared`, which is
+    /// lazy: touching it here would build the whole SwiftUI hierarchy just to
+    /// discover there was nothing to close, on every window close.
+    static func closeIfOpen() {
+        for window in NSApp.windows where window.windowController is SettingsWindowController {
+            window.close()
+        }
+    }
+
     static func show() {
         FontCatalogStore.shared.refresh()
         shared.showWindow(nil)

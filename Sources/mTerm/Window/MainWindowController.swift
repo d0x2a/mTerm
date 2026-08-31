@@ -339,6 +339,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
             && activeTabId == tab.id
     }
 
+    // MARK: NSWindowDelegate
+
+    func windowWillClose(_ notification: Notification) {
+        // Settings isn't a document window — with the last terminal gone there
+        // is nothing left for it to configure, and leaving it up keeps the app
+        // running: `applicationShouldTerminateAfterLastWindowClosed` only fires
+        // once *every* window has closed, Settings included.
+        //
+        // The closing window is still in `NSApp.windows` at this point, so it
+        // has to be excluded by identity rather than counted.
+        let anotherTerminalRemains = NSApp.windows.contains {
+            $0 !== window && $0.windowController is MainWindowController
+        }
+        if !anotherTerminalRemains {
+            SettingsWindowController.closeIfOpen()
+        }
+    }
+
     // MARK: NSWindowDelegate close confirmation
 
     /// Set by `windowShouldClose` so the post-confirmation close goes through
