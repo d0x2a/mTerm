@@ -20,12 +20,18 @@ struct Cell {
     /// Kept a plain byte so Cell stays trivially copyable — the grid is copied
     /// wholesale on every snapshot.
     var width: UInt8
+    /// OSC 8 hyperlink id, resolved through TerminalSnapshot.links; 0 means
+    /// the cell isn't part of a link. Lands in the two bytes that were already
+    /// padding after `width`, so Cell is still 16 bytes and the snapshot copy
+    /// costs exactly what it did.
+    var link: UInt16
 
     init(scalar: Unicode.Scalar = " ",
          fg: PackedColor? = nil,
          bg: PackedColor? = nil,
          attrs: CellAttrs = [],
-         width: UInt8 = 1) {
+         width: UInt8 = 1,
+         link: UInt16 = 0) {
         self.scalar = scalar
         // Only reach for the theme when a color is actually missing. That read
         // takes a lock and copies a Theme — two Strings and an Array, so atomic
@@ -41,6 +47,7 @@ struct Cell {
         }
         self.attrs = attrs
         self.width = width
+        self.link = link
     }
 
     var isBlank: Bool { scalar == " " && attrs.isEmpty }
@@ -74,6 +81,9 @@ struct TerminalSnapshot {
     let scrolledRows: Int          // total lines ever pushed to scrollback (for absolute coords)
     let currentDirectory: String?  // last OSC 7 reported cwd
     let usingAlt: Bool             // alt buffer is showing (vim, less, ...)
+    /// OSC 8 hyperlink targets, indexed by `Cell.link` - 1. Empty until
+    /// something on screen actually emits one.
+    let links: [String]
 
     /// Index in `cells` where viewport row `row` begins.
     @inline(__always)
@@ -256,6 +266,7 @@ final class TerminalState: ParserSink {
     private var savedFg: PackedColor
     private var savedBg: PackedColor
     private var savedAttrs: CellAttrs = []
+    private var savedLink: UInt16 = 0
 
     // Alt-screen support. When usingAlt is true, `cells` is the alt buffer
     // and `stashed*` holds the primary state.
@@ -266,6 +277,22 @@ final class TerminalState: ParserSink {
     private var stashedFg: PackedColor
     private var stashedBg: PackedColor
     private var stashedAttrs: CellAttrs = []
+    private var stashedLink: UInt16 = 0
+
+    // MARK: OSC 8 hyperlinks
+
+    /// Targets behind the ids in `Cell.link`, which is 1-based so 0 can mean
+    /// "not a link". Interned by URI, so the same target printed once per file
+    /// by `ls --hyperlink` is a single entry. Sharing an id across distant runs
+    /// is harmless because marking is per contiguous run, not per id.
+    private var linkURIs: [String] = []
+    private var linkIDs: [String: UInt16] = [:]
+    /// Table size that triggers a sweep, raised past whatever survives one so a
+    /// screen legitimately holding thousands of links doesn't sweep per link.
+    private var linkSweepAt = 4096
+    /// The link glyphs are being written into. Drawing state like SGR, but
+    /// deliberately not in CellAttrs: SGR 0 does not close a hyperlink.
+    private var currentLink: UInt16 = 0
 
     init(cols: Int, rows: Int) {
         self.cols = max(1, cols)
@@ -418,7 +445,8 @@ final class TerminalState: ParserSink {
                 prompts: visiblePrompts(offset: 0),
                 scrolledRows: scrolledRows,
                 currentDirectory: currentDirectory,
-                usingAlt: usingAlt
+                usingAlt: usingAlt,
+                links: linkURIs
             )
         }
 
@@ -466,7 +494,8 @@ final class TerminalState: ParserSink {
             prompts: visiblePrompts(offset: offset),
             scrolledRows: scrolledRows,
             currentDirectory: currentDirectory,
-            usingAlt: usingAlt
+            usingAlt: usingAlt,
+            links: linkURIs
         )
     }
 
@@ -551,7 +580,8 @@ final class TerminalState: ParserSink {
             fg: inv ? currentBg : currentFg,
             bg: inv ? currentFg : currentBg,
             attrs: currentAttrs,
-            width: UInt8(width)
+            width: UInt8(width),
+            link: currentLink
         )
         cells[rowBase(cursorRow) + cursorCol] = cell
         if width == 2 {
@@ -778,6 +808,8 @@ final class TerminalState: ParserSink {
             if let url = URL(string: payload), url.scheme == "file" {
                 currentDirectory = url.path
             }
+        case 8:                                 // hyperlink
+            handleHyperlink(payload)
         case 9:                                 // iTerm2 desktop notification
             // OSC 9 ; <message> — body only, no title. The "9;4;…" form is
             // ConEmu/Windows-Terminal progress, not a notification — skip it.
@@ -856,6 +888,142 @@ final class TerminalState: ParserSink {
             return String(format: "%04x", v8 &* 257)
         }
         return "rgb:\(channel(c.x))/\(channel(c.y))/\(channel(c.z))"
+    }
+
+    // MARK: OSC 8
+
+    /// Schemes a hyperlink may carry. A program can put any string in an OSC 8
+    /// and the text it labels is free to disagree with it, so anything that
+    /// isn't plainly a document — `javascript:`, `data:`, some app's private
+    /// scheme — never becomes clickable at all, rather than being caught later
+    /// at the click.
+    private static let linkSchemes: Set<String> = [
+        "http", "https", "file", "mailto", "ftp", "ftps",
+    ]
+
+    /// OSC 8 ; params ; URI — opens a hyperlink covering every glyph printed
+    /// until an OSC 8 with an empty URI closes it.
+    ///
+    /// Params are colon-separated key=value pairs. The only one with meaning is
+    /// `id=`, which exists to rejoin runs the terminal would otherwise read as
+    /// separate links; marking per contiguous run covers the case it was
+    /// invented for — a link broken across a wrap — so it is parsed past and
+    /// ignored.
+    private func handleHyperlink(_ payload: String) {
+        // Params end at the first ';'. A URI containing one has to
+        // percent-encode it, so a single split is the whole grammar.
+        guard let semi = payload.firstIndex(of: ";") else {
+            // Malformed: no params/URI boundary at all. Close rather than
+            // guess, so a broken sequence can't make the rest of the screen
+            // one enormous link.
+            currentLink = 0
+            return
+        }
+        let uri = String(payload[payload.index(after: semi)...])
+        currentLink = uri.isEmpty ? 0 : internLink(uri)
+    }
+
+    /// The id cells should carry for `uri`, or 0 when it can't be linked —
+    /// which leaves the text on screen exactly as it was, just not clickable.
+    private func internLink(_ uri: String) -> UInt16 {
+        guard uri.utf8.count <= 4096, isLinkable(uri) else { return 0 }
+        if let existing = linkIDs[uri] { return existing }
+        if linkURIs.count >= linkSweepAt { sweepLinks() }
+        // 0 is reserved and ids are 16-bit, so this is the ceiling. Declining
+        // to link is the only safe way to reach it: recycling an id would
+        // silently repoint scrollback that still carries it at a different URL.
+        guard linkURIs.count < Int(UInt16.max) else { return 0 }
+        linkURIs.append(uri)
+        let id = UInt16(linkURIs.count)
+        linkIDs[uri] = id
+        return id
+    }
+
+    private func isLinkable(_ uri: String) -> Bool {
+        guard let url = URL(string: uri),
+              let scheme = url.scheme?.lowercased(),
+              Self.linkSchemes.contains(scheme)
+        else { return false }
+        // A file URI names the host it lives on. Anything else is a path into
+        // someone else's filesystem that would quietly resolve against ours.
+        if scheme == "file" {
+            return Self.localHostNames.contains(url.host?.lowercased() ?? "")
+        }
+        return true
+    }
+
+    /// Host names in a `file://` URI that mean this machine. An empty host is
+    /// the spec's own answer, but GNU coreutils puts `gethostname()` in the
+    /// links `ls --hyperlink` emits — accepting only the empty host would drop
+    /// the most common producer of file links on the floor. Resolved once:
+    /// this is read on the parser queue.
+    private static let localHostNames: Set<String> = {
+        var names: Set<String> = ["", "localhost"]
+        var buf = [CChar](repeating: 0, count: 256)
+        guard gethostname(&buf, buf.count) == 0 else { return names }
+        let host = String(cString: buf).lowercased()
+        guard !host.isEmpty else { return names }
+        names.insert(host)
+        // `mac` and `mac.local` are the same machine.
+        let bare = String(host.split(separator: ".").first ?? "")
+        if !bare.isEmpty {
+            names.insert(bare)
+            names.insert(bare + ".local")
+        }
+        return names
+    }()
+
+    /// Drops targets no cell refers to any more and renumbers the rest, so a
+    /// long-lived session doesn't walk the 16-bit id space up to its ceiling.
+    /// Every grid that can hold a link has to be walked: the active cells, the
+    /// primary grid stashed behind an alt screen, and all of scrollback.
+    private func sweepLinks() {
+        guard !linkURIs.isEmpty else { return }
+        var live = [Bool](repeating: false, count: linkURIs.count + 1)
+        for c in cells where c.link != 0 { live[Int(c.link)] = true }
+        for c in stashedCells where c.link != 0 { live[Int(c.link)] = true }
+        for row in scrollbackStore {
+            for c in row where c.link != 0 { live[Int(c.link)] = true }
+        }
+        // The open link and the two saved slots have no cell yet but are about
+        // to write one.
+        for id in [currentLink, savedLink, stashedLink] where id != 0 {
+            live[Int(id)] = true
+        }
+
+        var remap = [UInt16](repeating: 0, count: linkURIs.count + 1)
+        var kept: [String] = []
+        kept.reserveCapacity(linkURIs.count)
+        for old in 1...linkURIs.count where live[old] {
+            kept.append(linkURIs[old - 1])
+            remap[old] = UInt16(kept.count)
+        }
+        guard kept.count < linkURIs.count else {
+            // Everything is still referenced. Back off, or the next link
+            // sweeps the whole of scrollback again for nothing.
+            linkSweepAt = max(linkSweepAt, linkURIs.count) * 2
+            return
+        }
+
+        for i in cells.indices where cells[i].link != 0 {
+            cells[i].link = remap[Int(cells[i].link)]
+        }
+        for i in stashedCells.indices where stashedCells[i].link != 0 {
+            stashedCells[i].link = remap[Int(stashedCells[i].link)]
+        }
+        for r in scrollbackStore.indices {
+            for i in scrollbackStore[r].indices where scrollbackStore[r][i].link != 0 {
+                scrollbackStore[r][i].link = remap[Int(scrollbackStore[r][i].link)]
+            }
+        }
+        currentLink = remap[Int(currentLink)]
+        savedLink   = remap[Int(savedLink)]
+        stashedLink = remap[Int(stashedLink)]
+
+        linkURIs = kept
+        linkIDs.removeAll(keepingCapacity: true)
+        for (i, uri) in kept.enumerated() { linkIDs[uri] = UInt16(i + 1) }
+        linkSweepAt = max(4096, kept.count * 2)
     }
 
     private func handlePrompt133(_ payload: String) {
@@ -1239,6 +1407,7 @@ final class TerminalState: ParserSink {
         savedFg = currentFg
         savedBg = currentBg
         savedAttrs = currentAttrs
+        savedLink = currentLink
     }
 
     private func restoreCursor() {
@@ -1247,6 +1416,7 @@ final class TerminalState: ParserSink {
         currentFg = savedFg
         currentBg = savedBg
         currentAttrs = savedAttrs
+        currentLink = savedLink
     }
 
     // MARK: alt screen
@@ -1263,6 +1433,7 @@ final class TerminalState: ParserSink {
         stashedFg = currentFg
         stashedBg = currentBg
         stashedAttrs = currentAttrs
+        stashedLink = currentLink
         cells = Array(repeating: Cell(), count: cols * rows)
         rowWrapped = Array(repeating: false, count: rows)
         rowOffset = 0
@@ -1272,6 +1443,7 @@ final class TerminalState: ParserSink {
         currentFg = PackedColor(theme.foreground)
         currentBg = PackedColor(theme.background)
         currentAttrs = []
+        currentLink = 0
         scrollTop = 0
         scrollBottom = rows - 1
         usingAlt = true
@@ -1289,6 +1461,7 @@ final class TerminalState: ParserSink {
         currentFg = stashedFg
         currentBg = stashedBg
         currentAttrs = stashedAttrs
+        currentLink = stashedLink
         scrollTop = 0
         scrollBottom = rows - 1
         usingAlt = false
@@ -1304,6 +1477,9 @@ final class TerminalState: ParserSink {
         currentFg = PackedColor(theme.foreground)
         currentBg = PackedColor(theme.background)
         currentAttrs = []
+        currentLink = 0
+        savedLink = 0
+        stashedLink = 0
         cursorVisible = true
         scrollTop = 0
         scrollBottom = rows - 1

@@ -120,6 +120,17 @@ extension Trigger {
     static let pathPattern =
         #"(?<![\w@:/~.-])(?:(?:~|\.{1,2})?/(?:\#(seg)/)*\#(seg)/?|\#(head)(?:/\#(seg))+/?|\#(head)/)(?::\d+(?::\d+)?)?"#
 
+    /// Stands in for a real trigger on an OSC 8 hyperlink, which no pattern
+    /// produced. Having one lets an explicit link reuse the whole path the
+    /// matched ones already use — hover marking, the pointing hand, ⌘-click.
+    /// `.none` for the same reason the builtins are: a link looks like the text
+    /// around it until the pointer reaches it.
+    static let hyperlink = Trigger(name: "Hyperlink",
+                                   pattern: "",
+                                   color: SIMD4(0.40, 0.65, 1.00, 1.00),
+                                   style: .none,
+                                   clickAction: .openURL)
+
     /// Defaults shipped with mTerm. Neither draws anything of its own: a link
     /// looks exactly like the text around it until the pointer reaches it,
     /// and only then takes the theme accent with a matching underline. What

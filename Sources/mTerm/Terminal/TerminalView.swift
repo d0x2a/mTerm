@@ -470,9 +470,17 @@ final class TerminalView: NSView, CALayerDelegate {
         hasher.combine(s.scrolledRows)
         hasher.combine(s.scrollOffset)
         hasher.combine(s.currentDirectory)
+        // Link ids ride along with the scalars: a screen whose text is
+        // unchanged but whose OSC 8 spans moved has different links. Packed
+        // into one combine so this stays the single pass it was.
         s.cells.withUnsafeBufferPointer { cells in
-            for cell in cells { hasher.combine(cell.scalar.value) }
+            for cell in cells {
+                hasher.combine(UInt64(cell.scalar.value) << 16 | UInt64(cell.link))
+            }
         }
+        // Ids are indexes into this, so the same id can mean a different target
+        // after a sweep renumbers the table.
+        hasher.combine(s.links.count)
         return hasher.finalize()
     }
 
@@ -546,6 +554,13 @@ final class TerminalView: NSView, CALayerDelegate {
     }
 
     private func handleTriggerClick(_ match: TriggerMatch) {
+        // An OSC 8 carries its own target, so nothing is inferred from the text
+        // under the pointer — that text is a label and is free to disagree with
+        // where it goes.
+        if let uri = match.hyperlink {
+            openHyperlink(uri)
+            return
+        }
         guard let action = match.trigger.clickAction else { return }
         switch action {
         case .openURL:
@@ -568,6 +583,19 @@ final class TerminalView: NSView, CALayerDelegate {
             var cmd = template.replacingOccurrences(of: "$1", with: match.text)
             cmd.append("\r")
             session?.write(Array(cmd.utf8))
+        }
+    }
+
+    /// Opens a link that arrived as an OSC 8. The scheme was checked when the
+    /// sequence was parsed, so this only has to decide between opening and
+    /// revealing: a `file://` is revealed for the same reason matched paths are
+    /// — ⌘-click shouldn't be able to run a .sh or a .app by accident.
+    private func openHyperlink(_ uri: String) {
+        guard let url = URL(string: uri) else { return }
+        if url.isFileURL {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -1159,7 +1187,7 @@ final class TerminalView: NSView, CALayerDelegate {
                                 cursorCol: 0, cursorRow: 0, cursorVisible: false,
                                 scrollbackLines: 0, scrollOffset: 0, title: "",
                                 prompts: [], scrolledRows: 0, currentDirectory: nil,
-                                usingAlt: false)
+                                usingAlt: false, links: [])
         lastScrollbackLines = snapshot.scrollbackLines
         lastSnapshotCols = snapshot.cols
         lastSnapshotRows = snapshot.rows
