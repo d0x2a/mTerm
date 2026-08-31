@@ -22,8 +22,14 @@ struct AppSettings: Codable, Equatable {
     var fontSize: Double = 14
     /// 0.0 = no stem-darkening (truest CoreText anti-aliasing, can read as
     /// "too thin" on dark themes); 1.0 ≈ macOS's old CG font-smoothing dilation.
-    /// 0.5 is the default — visibly bolder than 0 without overshooting iTerm.
-    var strokeWeight: Double = 0.5
+    ///
+    /// 1.0 is the default because anything less reads as washed out next to
+    /// Terminal.app. Measured on the same font and size (JetBrains Mono 13pt),
+    /// the old 0.5 default laid down 8.4% less ink than CoreGraphics' own
+    /// smoothing and rendered 13% of stems as single hairline pixels where
+    /// Terminal.app renders barely 1%. At 1.0 total coverage matches CG to
+    /// within 0.2%.
+    var strokeWeight: Double = 1.0
     /// Row height as a multiple of the font's tight ascent+descent box.
     /// 1.0 is the classic dense terminal packing (iTerm2 / Alacritty); 1.15 is
     /// the default because that packing reads as cramped at typical sizes —
@@ -88,7 +94,7 @@ struct AppSettings: Codable, Equatable {
         } else if let thin = try c.decodeIfPresent(Bool.self, forKey: .thinStrokes) {
             self.strokeWeight = thin ? 0.0 : 1.0
         } else {
-            self.strokeWeight = 0.5
+            self.strokeWeight = 1.0
         }
         // Settings files written before line spacing existed have no key, so
         // they adopt the new default rather than staying pinned to 1.0.

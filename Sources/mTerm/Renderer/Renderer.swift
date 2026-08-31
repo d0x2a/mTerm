@@ -118,7 +118,7 @@ final class Renderer {
     init(device: MTLDevice, pixelFormat: MTLPixelFormat, scale: CGFloat,
          fontFamily: String = FontCatalog.defaultFamily,
          fontSize: Double = 14,
-         strokeWeight: Double = 0.5,
+         strokeWeight: Double = 1.0,
          lineHeight: Double = 1.15) {
         self.device = device
         guard let queue = device.makeCommandQueue() else {
