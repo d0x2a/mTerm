@@ -5,6 +5,7 @@ import simd
 
 struct AppearancePane: View {
     @ObservedObject private var store = ThemeStore.shared
+    @ObservedObject private var fonts = FontCatalogStore.shared
 
     private var lightThemes: [Theme] {
         store.allThemes.filter { $0.appearance == .light }
@@ -40,10 +41,10 @@ struct AppearancePane: View {
             }
 
             Section("Font") {
-                Picker("Family", selection: $store.settings.fontFamily) {
-                    ForEach(FontCatalog.available, id: \.displayName) { entry in
-                        Text(entry.displayName).tag(entry.displayName)
-                    }
+                LabeledContent("Family") {
+                    FontFamilyPicker(selection: $store.settings.fontFamily,
+                                     entries: fonts.available)
+                        .fixedSize()
                 }
                 Stepper(value: $store.settings.fontSize,
                         in: FontCatalog.minSize...FontCatalog.maxSize,

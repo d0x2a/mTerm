@@ -32,9 +32,17 @@ final class SettingsWindowController: NSWindowController {
         self.init(window: window)
         window.windowController = self
         hosting.onLayout = { [weak self] in self?.fitWindowToPaneIfNeeded() }
+        // Catches a font installed while Settings sat open in the background:
+        // going off to install one makes another app key, and coming back
+        // makes this window key again. `show()` covers the first open and the
+        // case where the window is already key, which posts nothing.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main
+        ) { _ in FontCatalogStore.shared.refresh() }
     }
 
     static func show() {
+        FontCatalogStore.shared.refresh()
         shared.showWindow(nil)
         shared.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
