@@ -124,11 +124,24 @@ final class Session {
         }
     }
 
-    /// True while the child holds a synchronized-update frame open (DEC 2026).
-    /// The view stops presenting new frames until it closes.
-    var isSynchronizedUpdateActive: Bool {
-        if let value = publishedValue { return value.synchronizedUpdateActive }
-        return queue.sync { state.synchronizedUpdateActive }
+    /// The grid and the synchronized-update flag (DEC 2026) as of one publish,
+    /// read in a single lock acquisition. While the flag is set the view holds
+    /// the last frame instead of presenting this one.
+    ///
+    /// They have to come from the same publish. Asking for them separately let
+    /// the session queue swap `published` in between, so the view could clear
+    /// the gate against a finished frame and then draw the *next* one — taken
+    /// mid-redraw, with the child's erase applied and its repaint still to
+    /// come. That renders as a flash of half-drawn screen.
+    func publishedFrame(scrollOffset: Int) -> (snapshot: TerminalSnapshot,
+                                               synchronizedUpdateActive: Bool) {
+        if scrollOffset == 0, let value = publishedValue {
+            return (value.snapshot, value.synchronizedUpdateActive)
+        }
+        return queue.sync {
+            (state.viewportSnapshot(scrollOffset: scrollOffset),
+             state.synchronizedUpdateActive)
+        }
     }
 
     /// Whole-buffer text (scrollback + active grid) for "Copy All".

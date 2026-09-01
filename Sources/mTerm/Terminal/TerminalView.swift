@@ -695,7 +695,18 @@ final class TerminalView: NSView, CALayerDelegate {
     private func sessionDidOutput() {
         needsFrame = true
         guard CACurrentMediaTime() - lastPresentTime >= frameInterval else { return }
-        renderFrame()
+        // Honour the synchronized-update gate here too. Cutting latency means
+        // presenting as soon as output lands, but "output" is just as likely
+        // to be the first half of a frame the child hasn't finished drawing —
+        // and this path presented it regardless, which is what made a TUI's
+        // composer blink out between its erase and its repaint. `needsFrame`
+        // stays set, so the tick presents the finished frame when it closes.
+        guard let frame = session?.publishedFrame(scrollOffset: scrollOffset) else {
+            renderFrame()
+            return
+        }
+        if frame.synchronizedUpdateActive { return }
+        renderFrame(using: frame.snapshot)
     }
 
     /// Maps a viewport row to its absolute line. The top visible line is
@@ -1148,11 +1159,6 @@ final class TerminalView: NSView, CALayerDelegate {
         reportFocusIfChanged()
         reconcileThemeIfChanged()
         reconcileFontIfChanged()
-        // While the child holds a synchronized update open (DEC 2026), hold the
-        // last frame: apps that redraw several lines per frame — Homebrew's
-        // download list, say — would otherwise be sampled mid-redraw and tear.
-        // A resize still presents, since setFrameSize calls renderFrame direct.
-        if session?.isSynchronizedUpdateActive == true { return }
         // Idle ticks used to rebuild and present the whole grid 120 times a
         // second whether or not a pixel had changed. The blink phase is part of
         // the check because it's the one thing that legitimately changes on a
@@ -1160,7 +1166,20 @@ final class TerminalView: NSView, CALayerDelegate {
         let blink = cursorBlinkOn()
         let stale = CACurrentMediaTime() - lastPresentTime >= Self.maxIdleInterval
         guard needsFrame || blink != lastRenderedBlink || stale else { return }
-        renderFrame()
+        // While the child holds a synchronized update open (DEC 2026), hold the
+        // last frame: apps that redraw several lines per frame — Homebrew's
+        // download list, say — would otherwise be sampled mid-redraw and tear.
+        // A resize still presents, since setFrameSize calls renderFrame direct.
+        //
+        // The flag and the grid are taken together. Read separately, the queue
+        // could publish a new frame between the two, so a tick that cleared the
+        // gate against the finished frame went on to draw the half-drawn one.
+        guard let frame = session?.publishedFrame(scrollOffset: scrollOffset) else {
+            renderFrame()
+            return
+        }
+        if frame.synchronizedUpdateActive { return }
+        renderFrame(using: frame.snapshot)
     }
 
     /// Focus reporting (?1004): apps that highlight the focused pane want to
@@ -1179,9 +1198,10 @@ final class TerminalView: NSView, CALayerDelegate {
     /// link each tick, but also invoked synchronously from `setFrameSize` so a
     /// resize presents a correctly-sized frame in the same layout pass instead
     /// of letting Core Animation stretch the stale drawable until the next tick.
-    private func renderFrame() {
+    private func renderFrame(using prefetched: TerminalSnapshot? = nil) {
         guard let metalLayer = layer as? CAMetalLayer, let renderer else { return }
-        let snapshot = session?.snapshot(scrollOffset: scrollOffset)
+        let snapshot = prefetched
+            ?? session?.snapshot(scrollOffset: scrollOffset)
             ?? TerminalSnapshot(cols: 1, rows: 1, cells: [Cell()], rowOffset: 0,
                                 rowWrapped: [false],
                                 cursorCol: 0, cursorRow: 0, cursorVisible: false,
