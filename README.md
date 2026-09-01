@@ -2,9 +2,9 @@
 
 A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
-![mTerm running scripts/rendercheck.sh: a truecolor gradient, the 256-colour palette, emoji, double-width Japanese text, inverse video and underlines](docs/renderer.png)
+![mTerm running scripts/rendercheck.sh: bold, italic, underlined and inverse text, a truecolor gradient, the 256-colour palette, emoji, and double-width Japanese text](docs/renderer.png)
 
-<sub>`scripts/rendercheck.sh` — truecolor, the 256-colour palette, emoji, double-width CJK, combining marks, inverse and underline, all in one screen.</sub>
+<sub>`scripts/rendercheck.sh` — bold, italic, underline, faint and inverse, truecolor, the 256-colour palette, emoji, double-width CJK and combining marks, all in one screen.</sub>
 
 ![mTerm showing a git log in the repository, with the tab sidebar on the left](docs/session.png)
 
@@ -46,6 +46,7 @@ swift run -c release mTerm
 
 - AppKit-native window with tabbed sidebar (drag to reorder), full-screen, session restore (tabs + CWDs). The sidebar and split divider tint to the active theme.
 - Metal-rendered terminal view with pixel-snapped glyph atlas — crisp text at all sizes, no GPU filtering blur.
+- Bold and italic draw in the font's own faces, not a synthesised slant or smear, and the advance is identical across all four so the columns never drift. Underline, faint and inverse too, including the codes that turn each of them back off.
 - Resizing reflows the buffer: wrapped lines rejoin and re-split at the new width rather than being cut off, and the grid size shows in a readout while you drag.
 - xterm-256color compatibility for vim/neovim/htop/fzf/less/git pagers. 24-bit true color, alt-screen, scroll regions (DECSTBM), DEC line drawing, and synchronized output (DEC 2026) so multi-line redraws land in one frame.
 - Mouse reporting: SGR (1006) and legacy encodings for click, drag, motion, and wheel — hold ⇧ to select instead. Bracketed paste, focus events, and device/cursor-position reports.
