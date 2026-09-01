@@ -352,11 +352,34 @@ final class Renderer {
                     }
                     // Otherwise: unfocused window or "off" half of the blink → no cursor.
 
+                    // SGR underline. Emitted before the blank-cell skips below,
+                    // because an underlined run has to stay unbroken across the
+                    // spaces in it. Shares the trigger underline's geometry, so
+                    // the two can't disagree about where a line sits.
+                    if cell.attrs.contains(.underline) && !cell.isContinuation {
+                        let inverted = isCursor && focused && cursorOn
+                        var lineColor = (inverted ? cell.bg : cell.fg).simd
+                        if cell.attrs.contains(.faint) {
+                            lineColor = mix(lineColor, cell.bg.simd, t: 0.5)
+                        }
+                        let w = cell.width == 2 ? cellWidth * 2 : cellWidth
+                        flatScratch.append(FlatInstance(
+                            pos: SIMD2<Float>(cellLeft, cellTop + underlineTop),
+                            size: SIMD2<Float>(w, underlineThickness),
+                            color: lineColor
+                        ))
+                    }
+
                     // Glyph: skip blank cells, and the trailing half of a
                     // double-width glyph — its head already drew across both cells.
                     if cell.isContinuation { continue }
                     if cell.scalar == " " { continue }
-                    guard let entry = glyphAtlas.entry(for: cell.scalar),
+                    // Bold and italic pick a different face; the atlas keys them
+                    // apart by the font's identity.
+                    var glyphStyle: GlyphStyle = []
+                    if cell.attrs.contains(.bold)   { glyphStyle.insert(.bold) }
+                    if cell.attrs.contains(.italic) { glyphStyle.insert(.italic) }
+                    guard let entry = glyphAtlas.entry(for: cell.scalar, style: glyphStyle),
                           entry.atlasSize.x > 0 else { continue }
 
                     let glyphPos = SIMD2<Float>(

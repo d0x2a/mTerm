@@ -49,6 +49,17 @@ private struct Shelf {
     }
 }
 
+/// Which face a cell's glyph wants. Bold and italic are separate CTFonts, so
+/// their atlas entries already key apart on their own — `GlyphKey` carries the
+/// font's identity, not just the glyph id.
+struct GlyphStyle: OptionSet, Hashable {
+    let rawValue: Int
+    static let bold   = GlyphStyle(rawValue: 1 << 0)
+    static let italic = GlyphStyle(rawValue: 1 << 1)
+    /// regular, bold, italic, bold-italic
+    static let faceCount = 4
+}
+
 final class GlyphAtlas {
     let texture: MTLTexture
     /// RGBA companion for color-bitmap glyphs (Apple Color Emoji). Kept apart
@@ -68,10 +79,14 @@ final class GlyphAtlas {
 
     /// Atlas entries are keyed by (fontID, glyph). CGGlyph IDs are font-local,
     /// so once we start using fallback fonts for missing glyphs (e.g. ➜ which
-    /// SF Mono doesn't carry) we have to disambiguate by font.
+    /// SF Mono doesn't carry) we have to disambiguate by font. That is also
+    /// what keeps the bold and italic faces apart, with no bit for the style:
+    /// they are different CTFonts, so they key apart already.
     private var entries: [GlyphKey: GlyphEntry] = [:]
     /// Cached per-scalar resolution. nil = known-missing across primary + fallback.
-    private var scalarToResolved: [UInt32: Resolved?] = [:]
+    /// One map per face: a scalar resolves to a different glyph id in each.
+    private var scalarToResolved =
+        [[UInt32: Resolved?]](repeating: [:], count: GlyphStyle.faceCount)
     /// Direct-mapped fast path for ASCII, which is very nearly everything a
     /// terminal draws. The general path costs two dictionary probes per glyph
     /// per *frame* — scalar → resolved font, then (font, glyph) → atlas entry —
@@ -79,7 +94,13 @@ final class GlyphAtlas {
     /// the frame build. Only successful lookups are cached: a glyph that came
     /// back nil because the atlas was momentarily full still retries later,
     /// exactly as it did before.
-    private var asciiEntries = [GlyphEntry?](repeating: nil, count: 128)
+    private var asciiEntries = [[GlyphEntry?]](
+        repeating: [GlyphEntry?](repeating: nil, count: 128),
+        count: GlyphStyle.faceCount)
+    /// The four faces, indexed by `GlyphStyle.rawValue`. A family with no bold
+    /// or italic falls back to the regular face rather than failing, so the
+    /// text still renders — just without the distinction.
+    private let faces: [CTFont]
     /// Extra blank pixels around each glyph in the atlas. 2px (not 1) so the
     /// sub-pixel offset baked into the rasterization (see `rasterize`) can't
     /// push anti-aliased pixels past the bitmap edge.
@@ -96,6 +117,12 @@ final class GlyphAtlas {
          width: Int = 2048, height: Int = 2048,
          colorWidth: Int = 1024, colorHeight: Int = 1024) {
         self.font = font
+        self.faces = [
+            font,
+            GlyphAtlas.face(of: font, adding: .traitBold),
+            GlyphAtlas.face(of: font, adding: .traitItalic),
+            GlyphAtlas.face(of: font, adding: [.traitBold, .traitItalic]),
+        ]
         self.strokeWeight = strokeWeight
         self.width = width
         self.height = height
@@ -162,23 +189,25 @@ final class GlyphAtlas {
         self.colorTexture = colorTex
     }
 
-    func entry(for scalar: Unicode.Scalar) -> GlyphEntry? {
+    func entry(for scalar: Unicode.Scalar, style: GlyphStyle = []) -> GlyphEntry? {
+        let face = style.rawValue
         let value = scalar.value
-        if value < 128, let cached = asciiEntries[Int(value)] { return cached }
-        let entry = resolvedEntry(for: scalar)
-        if value < 128, let entry { asciiEntries[Int(value)] = entry }
+        if value < 128, let cached = asciiEntries[face][Int(value)] { return cached }
+        let entry = resolvedEntry(for: scalar, style: style)
+        if value < 128, let entry { asciiEntries[face][Int(value)] = entry }
         return entry
     }
 
     /// The general two-dictionary path, for anything the ASCII cache can't answer.
-    private func resolvedEntry(for scalar: Unicode.Scalar) -> GlyphEntry? {
-        if let cached = scalarToResolved[scalar.value] {
+    private func resolvedEntry(for scalar: Unicode.Scalar, style: GlyphStyle) -> GlyphEntry? {
+        let face = style.rawValue
+        if let cached = scalarToResolved[face][scalar.value] {
             guard let r = cached else { return nil }
             return entry(font: r.font, glyph: r.glyph, isColor: r.isColor)
         }
 
-        let resolved = resolve(scalar: scalar)
-        scalarToResolved[scalar.value] = resolved
+        let resolved = resolve(scalar: scalar, style: style)
+        scalarToResolved[face][scalar.value] = resolved
         guard let r = resolved else { return nil }
         return entry(font: r.font, glyph: r.glyph, isColor: r.isColor)
     }
@@ -187,6 +216,14 @@ final class GlyphAtlas {
         let key = GlyphKey(fontID: ObjectIdentifier(font), glyph: glyph)
         if let cached = entries[key] { return cached }
         return rasterize(font: font, glyph: glyph, isColor: isColor)
+    }
+
+    /// Derives a bold/italic face from the configured one. CoreText returns nil
+    /// when the family has no such face, and then the regular face stands in
+    /// rather than the glyph going missing — the text loses the distinction
+    /// but still draws. JetBrains Mono, SF Mono and Menlo all carry all four.
+    private static func face(of base: CTFont, adding traits: CTFontSymbolicTraits) -> CTFont {
+        CTFontCreateCopyWithSymbolicTraits(base, 0, nil, traits, traits) ?? base
     }
 
     /// Looks a scalar up in the primary font, then in whatever CoreText
@@ -198,17 +235,18 @@ final class GlyphAtlas {
     /// in the first slot and 0 in the second. Asking with a single UniChar,
     /// as this used to, cannot express those scalars at all, which is why every
     /// emoji above the BMP went missing.
-    private func resolve(scalar: Unicode.Scalar) -> Resolved? {
+    private func resolve(scalar: Unicode.Scalar, style: GlyphStyle) -> Resolved? {
+        let primary = faces[style.rawValue]
         let units = Array(String(scalar).utf16)
         var chars = units
         var glyphs = [CGGlyph](repeating: 0, count: units.count)
-        CTFontGetGlyphsForCharacters(font, &chars, &glyphs, units.count)
+        CTFontGetGlyphsForCharacters(primary, &chars, &glyphs, units.count)
         if glyphs[0] != 0 {
-            return Resolved(font: font, glyph: glyphs[0], isColor: false)
+            return Resolved(font: primary, glyph: glyphs[0], isColor: false)
         }
         let s = String(scalar) as NSString
         let range = CFRangeMake(0, s.length)
-        let fallback = CTFontCreateForString(font, s, range)
+        let fallback = CTFontCreateForString(primary, s, range)
         var fbChars = units
         var fbGlyphs = [CGGlyph](repeating: 0, count: units.count)
         CTFontGetGlyphsForCharacters(fallback, &fbChars, &fbGlyphs, units.count)
