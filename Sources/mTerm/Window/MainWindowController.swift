@@ -25,7 +25,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     private(set) var activeTabId: UUID?
 
     private let sidebar = SidebarView()
-    private let contentContainer = NSView()
+/// One Metal surface and one Renderer for the whole window; the active
+    /// tab's view is pinned inside it. See TerminalSurface — a layer per tab
+    /// cost a drawable pool per tab, forever.
+    private let contentContainer = TerminalSurface()
     private let splitVC = WideDividerSplitViewController()
     private let gridHUD = GridSizeHUD()
     private var gridHUDHideTimer: Timer?

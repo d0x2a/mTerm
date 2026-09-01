@@ -1,12 +1,38 @@
 import AppKit
 import Metal
+import os
 import QuartzCore
 import simd
 
 final class TerminalView: NSView, CALayerDelegate {
-    private var renderer: Renderer?
+    /// The window's shared Metal surface — our superview while this tab is the
+    /// active one, and nil while it is in the background. Everything that draws
+    /// goes through it; see TerminalSurface for why it isn't per-tab.
+    private var surface: TerminalSurface? { superview as? TerminalSurface }
+    private var renderer: Renderer? { surface?.renderer }
+
     private var session: Session?
     private var displayLink: CADisplayLink?
+
+    /// Live instances, maintained by `init`/`deinit`. Compare it against the
+    /// window's tab count; they must agree.
+    ///
+    /// Worth counting because a view that outlives its tab is otherwise
+    /// invisible. It keeps its Session, the PTY behind it and a 10,000-row
+    /// scrollback alive, and it stays reachable from the window the whole time
+    /// — so `leaks` reports nothing and there is no other signal at all.
+    ///
+    /// This exists because the GPU cost used to be far worse: each view owned a
+    /// CAMetalLayer whose drawable pool is several full backing stores, held
+    /// until the layer deallocated rather than when it left the view hierarchy.
+    /// That is now one pool for the window (see TerminalSurface), but the
+    /// counter is what proved the views themselves were being released, so keep
+    /// it honest.
+    private(set) static var liveCount = 0
+
+    private static let log = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "mTerm", category: "lifetime"
+    )
 
     weak var delegate: TerminalViewDelegate?
 
@@ -109,10 +135,6 @@ final class TerminalView: NSView, CALayerDelegate {
     /// left edge) so we don't clobber its resize cursor with the I-beam.
     private var lastMouseWindowPoint: NSPoint? = nil
     private var lastAppliedTheme: Theme = ThemeStore.currentTheme
-    private var lastAppliedFontFamily: String = ThemeStore.shared.settings.fontFamily
-    private var lastAppliedFontSize: Double = ThemeStore.shared.settings.fontSize
-    private var lastAppliedStrokeWeight: Double = ThemeStore.shared.settings.strokeWeight
-    private var lastAppliedLineHeight: Double = ThemeStore.shared.settings.lineHeight
 
     override var wantsUpdateLayer: Bool { true }
     override var isFlipped: Bool { true }
@@ -121,12 +143,27 @@ final class TerminalView: NSView, CALayerDelegate {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        // For a Metal-backed view, AppKit should never try to redraw the layer
-        // itself — our presents are the only source of truth.
+        // Nothing is drawn here any more — the pixels come from the shared
+        // TerminalSurface underneath. This view is the input and hit-testing
+        // layer (and the SearchBar's host), so its own layer stays empty.
         layerContentsRedrawPolicy = .never
+        TerminalView.liveCount += 1
+        Self.log.notice("TerminalView init - \(TerminalView.liveCount, privacy: .public) live")
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// Tripwire for the cost described on `liveCount`. Closing a tab has to
+    /// land here; if the log stays quiet while tabs come and go, a view is
+    /// being retained and its session and scrollback are retained with it.
+    ///
+    /// There is deliberately nothing to tear down. `displayLink` retains its
+    /// target, so a live one would have kept this from running at all — by the
+    /// time we get here `viewDidMoveToWindow` has already invalidated it.
+    deinit {
+        TerminalView.liveCount -= 1
+        Self.log.notice("TerminalView deinit - \(TerminalView.liveCount, privacy: .public) live")
+    }
 
     /// Called every tick. Detects theme changes and dispatches a cell remap so
     /// already-printed text picks up the new palette.
@@ -144,48 +181,9 @@ final class TerminalView: NSView, CALayerDelegate {
     /// re-flows the PTY to the new cell grid so the shell doesn't keep believing
     /// it has the old cols/rows.
     private func reconcileFontIfChanged() {
-        let s = ThemeStore.shared.settings
-        guard s.fontFamily != lastAppliedFontFamily
-            || s.fontSize != lastAppliedFontSize
-            || s.strokeWeight != lastAppliedStrokeWeight
-            || s.lineHeight != lastAppliedLineHeight
-        else { return }
+        guard let surface, surface.reconcileFontIfChanged() else { return }
         invalidate()
-        lastAppliedFontFamily = s.fontFamily
-        lastAppliedFontSize = s.fontSize
-        lastAppliedStrokeWeight = s.strokeWeight
-        lastAppliedLineHeight = s.lineHeight
-        rebuildRenderer()
-    }
-
-    private func rebuildRenderer() {
-        guard let metalLayer = layer as? CAMetalLayer,
-              let device = metalLayer.device else { return }
-        let scale = window?.backingScaleFactor ?? 2.0
-        renderer = Renderer(
-            device: device,
-            pixelFormat: metalLayer.pixelFormat,
-            scale: scale,
-            fontFamily: lastAppliedFontFamily,
-            fontSize: lastAppliedFontSize,
-            strokeWeight: lastAppliedStrokeWeight,
-            lineHeight: lastAppliedLineHeight
-        )
         resizeSessionIfNeeded()
-    }
-
-    override func makeBackingLayer() -> CALayer {
-        let layer = CAMetalLayer()
-        layer.pixelFormat = .bgra8Unorm
-        layer.framebufferOnly = true
-        layer.allowsNextDrawableTimeout = false
-        layer.needsDisplayOnBoundsChange = true
-        layer.isOpaque = true            // we render fully-opaque frames
-        // Present drawables inside the current CA transaction so a frame is
-        // never shown at a size that disagrees with the layer's geometry —
-        // this is what keeps live resize (window + sidebar divider) smooth.
-        layer.presentsWithTransaction = true
-        return layer
     }
 
     override func viewDidMoveToWindow() {
@@ -195,9 +193,11 @@ final class TerminalView: NSView, CALayerDelegate {
             displayLink = nil
             return
         }
-        configureMetalIfNeeded()
-        updateDrawableSize()
         ensureSession()
+        // The shared surface may have been rebuilt for a new font, or the
+        // window resized, while this tab sat in the background with no ticks
+        // running. Re-flow the PTY to whatever the grid is now.
+        resizeSessionIfNeeded()
         let link = window.displayLink(target: self, selector: #selector(tick(_:)))
         // Ask for the panel's full rate. Left unset the system chooses, and a
         // rate below the display's maximum doesn't only pace the tick — it also
@@ -213,14 +213,10 @@ final class TerminalView: NSView, CALayerDelegate {
         window.makeFirstResponder(self)
     }
 
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        updateDrawableSize()
-    }
-
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        updateDrawableSize()
+        // The surface sized its drawable in its own setFrameSize, which AppKit
+        // runs before laying us out, so the grid below reads the new size.
         resizeSessionIfNeeded()
         // Present immediately at the new size. With `presentsWithTransaction`
         // the present lands in the same CA transaction as the layout change,
@@ -1072,44 +1068,8 @@ final class TerminalView: NSView, CALayerDelegate {
 
     // MARK: setup
 
-    private func configureMetalIfNeeded() {
-        guard renderer == nil, let metalLayer = layer as? CAMetalLayer else { return }
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            assertionFailure("Metal is required")
-            return
-        }
-        metalLayer.device = device
-        let scale = window?.backingScaleFactor ?? 2.0
-        let s = ThemeStore.shared.settings
-        renderer = Renderer(
-            device: device,
-            pixelFormat: metalLayer.pixelFormat,
-            scale: scale,
-            fontFamily: s.fontFamily,
-            fontSize: s.fontSize,
-            strokeWeight: s.strokeWeight,
-            lineHeight: s.lineHeight
-        )
-    }
-
-    private func updateDrawableSize() {
-        guard let metalLayer = layer as? CAMetalLayer, let window else { return }
-        let scale = window.backingScaleFactor
-        let size = bounds.size
-        // Geometry changes during a live drag must not trigger implicit CALayer
-        // animations — those interpolate the drawable size and read as lag.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        metalLayer.contentsScale = scale
-        metalLayer.drawableSize = CGSize(
-            width: max(1, size.width * scale),
-            height: max(1, size.height * scale)
-        )
-        CATransaction.commit()
-    }
-
     private func gridDimensions() -> (cols: Int, rows: Int)? {
-        guard let renderer, let metalLayer = layer as? CAMetalLayer else { return nil }
+        guard let renderer, let metalLayer = surface?.metalLayer else { return nil }
         let ds = metalLayer.drawableSize
         // Require a real-sized viewport: avoids creating a 1x1 session that
         // immediately scrolls the shell prompt away before the real resize.
@@ -1199,7 +1159,7 @@ final class TerminalView: NSView, CALayerDelegate {
     /// resize presents a correctly-sized frame in the same layout pass instead
     /// of letting Core Animation stretch the stale drawable until the next tick.
     private func renderFrame(using prefetched: TerminalSnapshot? = nil) {
-        guard let metalLayer = layer as? CAMetalLayer, let renderer else { return }
+        guard let metalLayer = surface?.metalLayer, let renderer else { return }
         let snapshot = prefetched
             ?? session?.snapshot(scrollOffset: scrollOffset)
             ?? TerminalSnapshot(cols: 1, rows: 1, cells: [Cell()], rowOffset: 0,
