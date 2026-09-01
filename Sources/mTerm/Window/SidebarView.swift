@@ -113,20 +113,26 @@ final class SidebarView: NSView {
     }
 
     func update(tabs: [(id: UUID, title: String)], activeId: UUID?) {
+        // Only rebuild when the tabs themselves change. Titles change on every
+        // prompt and refreshSidebar() runs for each one — tearing down the row
+        // under the pointer would cancel the press AppKit is tracking, losing
+        // the click or the drag about to start. Selecting a tab refreshes the
+        // sidebar too, so a row has to survive its own onSelect.
+        if rows.map(\.id) != tabs.map(\.id) {
+            rebuildRows(for: tabs)
+        }
+        for (idx, tab) in tabs.enumerated() {
+            rows[idx].apply(title: tab.title,
+                            isActive: tab.id == activeId,
+                            badge: badge(at: idx, of: tabs.count))
+        }
+    }
+
+    private func rebuildRows(for tabs: [(id: UUID, title: String)]) {
         rows.forEach { $0.removeFromSuperview() }
         rows.removeAll(keepingCapacity: true)
-        let count = tabs.count
-        for (idx, tab) in tabs.enumerated() {
-            let badge: String?
-            if idx < 8 {
-                badge = "⌘\(idx + 1)"
-            } else if idx == count - 1 {
-                badge = "⌘9"           // ⌘9 jumps to the last tab
-            } else {
-                badge = nil
-            }
-            let row = TabRowView(id: tab.id, title: tab.title,
-                                 isActive: tab.id == activeId, badge: badge)
+        for tab in tabs {
+            let row = TabRowView(id: tab.id)
             row.onSelect = { [weak self] in self?.delegate?.sidebarDidSelect(tabId: tab.id) }
             row.onClose  = { [weak self] in self?.delegate?.sidebarDidRequestClose(tabId: tab.id) }
             row.translatesAutoresizingMaskIntoConstraints = false
@@ -136,6 +142,13 @@ final class SidebarView: NSView {
         }
         // Keep the indicator above the new rows.
         document.addSubview(dropIndicator)
+    }
+
+    /// ⌘1–8 address the first eight tabs; ⌘9 always jumps to the last one.
+    private func badge(at idx: Int, of count: Int) -> String? {
+        if idx < 8 { return "⌘\(idx + 1)" }
+        if idx == count - 1 { return "⌘9" }
+        return nil
     }
 
     // MARK: drop logic
@@ -221,23 +234,23 @@ final class TabRowView: NSView, NSDraggingSource {
     private let label = NSTextField(labelWithString: "")
     private let badgeLabel = NSTextField(labelWithString: "")
     private let closeBtn = NSButton()
-    private let isActive: Bool
-    private let badgeText: String?
+    private var isActive = false
+    private var badgeText: String?
     private var hover = false { didSet { refreshAppearance() } }
     private var trackingArea: NSTrackingArea?
 
-    /// Set in mouseDown; consumed in mouseUp (as a click) or in mouseDragged
-    /// (to start a drag). Nil means no pending press is being tracked.
+    /// Press origin in window coordinates, set in mouseDown and cleared when
+    /// the press ends or turns into a drag. Distance from it is what separates
+    /// a click from a reorder. Comfortably above trackpad click jitter: at 4pt
+    /// an ordinary click would spawn a drag session.
     private var pressDownLocation: NSPoint?
-    private static let dragThreshold: CGFloat = 4
+    private static let dragThreshold: CGFloat = 10
 
     var onSelect: (() -> Void)?
     var onClose:  (() -> Void)?
 
-    init(id: UUID, title: String, isActive: Bool, badge: String? = nil) {
+    init(id: UUID) {
         self.id = id
-        self.isActive = isActive
-        self.badgeText = badge
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -249,7 +262,6 @@ final class TabRowView: NSView, NSDraggingSource {
         highlight.translatesAutoresizingMaskIntoConstraints = false
         addSubview(highlight)
 
-        label.stringValue = title
         label.font = NSFont.systemFont(ofSize: 12)
         label.lineBreakMode = .byTruncatingMiddle
         label.maximumNumberOfLines = 1
@@ -259,11 +271,9 @@ final class TabRowView: NSView, NSDraggingSource {
         // must truncate rather than push the badge past the trailing edge.
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        badgeLabel.stringValue = badge ?? ""
         badgeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         badgeLabel.textColor = .tertiaryLabelColor
         badgeLabel.alignment = .right
-        badgeLabel.isHidden = badge == nil
         badgeLabel.translatesAutoresizingMaskIntoConstraints = false
         badgeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         badgeLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -327,6 +337,12 @@ final class TabRowView: NSView, NSDraggingSource {
 
     override func mouseDown(with event: NSEvent) {
         pressDownLocation = event.locationInWindow
+        // Select on press, the way NSTableView and the Finder sidebar do.
+        // Waiting for mouseUp meant a press that drifted past the drag
+        // threshold became a drag session instead — and a drag session
+        // swallows mouseUp, so the click selected nothing and the tab you
+        // aimed at stayed in the background.
+        onSelect?()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -336,15 +352,12 @@ final class TabRowView: NSView, NSDraggingSource {
         let dist2 = dx * dx + dy * dy
         guard dist2 >= Self.dragThreshold * Self.dragThreshold else { return }
 
-        pressDownLocation = nil          // consume — mouseUp won't fire onSelect.
+        pressDownLocation = nil          // consume — this press is a drag now.
         beginTabDrag(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
-        if pressDownLocation != nil {
-            pressDownLocation = nil
-            onSelect?()
-        }
+        pressDownLocation = nil
     }
 
     private func beginTabDrag(with event: NSEvent) {
@@ -386,6 +399,17 @@ final class TabRowView: NSView, NSDraggingSource {
     }
 
     // MARK: appearance
+
+    /// Updates the row in place. Rows outlive a sidebar refresh so that a
+    /// press in flight isn't cancelled by an unrelated title change.
+    func apply(title: String, isActive: Bool, badge: String?) {
+        let badgeString = badge ?? ""
+        if label.stringValue != title { label.stringValue = title }
+        if badgeLabel.stringValue != badgeString { badgeLabel.stringValue = badgeString }
+        self.isActive = isActive
+        self.badgeText = badge
+        refreshAppearance()
+    }
 
     private func refreshAppearance() {
         if isActive {
