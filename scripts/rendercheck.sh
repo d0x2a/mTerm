@@ -1,7 +1,7 @@
 #!/bin/sh
 # Prints one screen exercising the parts of the renderer that are easy to
-# break and impossible to unit-test: glyph colour, the emoji atlas, cell
-# alignment, and the overlays drawn on top of cells.
+# break and impossible to unit-test: text attributes, glyph colour, the emoji
+# atlas, cell alignment, and the overlays drawn on top of cells.
 #
 #   sh scripts/rendercheck.sh
 #
@@ -11,9 +11,16 @@
 b() { printf '\033[1m%s\033[0m\n' "$1"; }
 
 echo
-b "1. FAINT (SGR 2) — dim grey, evenly blended, no colour cast"
-printf '   normal  \033[2mfaint\033[0m  \033[1mbold\033[0m   |  '
-printf '\033[31mred \033[2mred-faint\033[0m  \033[32mgrn \033[2mgrn-faint\033[0m  \033[34mblu \033[2mblu-faint\033[0m\n'
+b "1. TEXT ATTRIBUTES (SGR) — each must differ visibly from the 'normal' beside it"
+printf '   normal  \033[2mfaint\033[0m      dim grey, evenly blended, no colour cast\n'
+printf '   normal  \033[1mbold\033[0m       heavier stems, same advance so columns stay aligned\n'
+printf '   normal  \033[3mitalic\033[0m     sloped, and still inside its own cell\n'
+printf '   normal  \033[4munderline\033[0m  a line clear of the descenders in g, p, y\n'
+printf '   normal  \033[7minverse\033[0m    foreground and background swapped\n'
+printf '   combined:  \033[1;4mbold+underline\033[0m  \033[3;4mitalic+underline\033[0m  \033[1;3mbold+italic\033[0m  \033[1;3;4mall three\033[0m\n'
+printf '   coloured:  \033[1;31mbold red\033[0m  \033[3;32mitalic green\033[0m  \033[4;34munderline blue\033[0m  \033[1;4;31mbold-underline-red\033[0m\n'
+printf '   turned off again: \033[1mbold\033[22m normal  \033[3mitalic\033[23m normal  \033[4munder\033[24m normal  \033[7minv\033[27m normal\n'
+printf '   faint keeps its colour: \033[31mred \033[2mred-faint\033[0m  \033[32mgrn \033[2mgrn-faint\033[0m  \033[34mblu \033[2mblu-faint\033[0m\n'
 printf '   ghost text: \033[2mthe quick brown fox jumps over the lazy dog\033[0m\n'
 echo
 b "2. EMOJI + symbols — full colour, sitting inside their own cells"
@@ -31,11 +38,10 @@ while [ $i -lt 72 ]; do
 done
 printf '\033[0m\n'
 echo
-b "5. 256-COLOUR palette + inverse + underline"
+b "5. 256-COLOUR palette — 108 distinct steps, no repeats or gaps"
 i=16; printf '   '
 while [ $i -lt 124 ]; do printf '\033[48;5;%dm ' "$i"; i=$((i + 1)); done
 printf '\033[0m\n'
-printf '   \033[7m inverse video \033[0m   \033[4munderlined\033[0m   \033[1;4;31mbold-underline-red\033[0m\n'
 echo
 b "6. TRIGGERS — hold Cmd: underline appears and the pointer becomes a hand"
 echo "   https://github.com/d0x2a/mTerm"
