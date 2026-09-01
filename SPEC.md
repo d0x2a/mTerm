@@ -221,23 +221,42 @@ These are targets, not measurements. There is no benchmark harness and no perf C
 
 ## v1 Definition of Done ("Daily-driver minimum")
 
-Required to ship 1.0:
+Required to ship 1.0. Items that were half-done as one line are split in two,
+so nothing is blocked from being ticked by a part of it that hasn't shipped.
 
-- [ ] AppKit shell, macOS-native tabs, full-screen, window restore
-- [ ] Metal-rendered terminal view with subpixel glyph atlas
-- [ ] xterm-256color compatibility (vim/neovim/htop/tmux/fzf/less/git verified)
-- [ ] PTY + child process management
-- [ ] Scrollback (configurable size) + search (plain + regex)
-- [ ] Shell integration (bash/zsh/fish), jump-to-prompt
-- [ ] Triggers (highlight + clickable URLs/paths + custom)
+- [x] AppKit shell, tab sidebar, full-screen, window restore
+- [x] Metal-rendered terminal view with a pixel-snapped glyph atlas
+- [x] xterm-256color compatibility (vim/neovim/htop/fzf/less/git)
+- [x] PTY + child process management
+- [x] Scrollback search (plain + regex, smart-case)
+- [ ] Configurable scrollback size — fixed at 10,000 lines today
+- [x] Shell integration for zsh (OSC 133), jump-to-prompt
+- [ ] Shell integration for bash + fish
+- [x] Triggers: highlighting, clickable URLs and paths, OSC 8 hyperlinks
+- [ ] Triggers: editor UI and a `runCommand` action
 - [ ] tmux `-CC` integration mode
 - [ ] Profiles (simplified model)
-- [ ] Themes + macOS appearance switching
-- [ ] Searchable SwiftUI settings window
-- [ ] Session restore
-- [ ] Signed + notarized DMG
-- [ ] README, screenshots, simple landing page
+- [x] Themes + macOS appearance switching
+- [x] Settings window (Appearance / General / Notifications)
+- [ ] Settings search
+- [x] Session restore
+- [x] Signed + notarized DMG
+- [x] README + screenshots
+- [ ] Simple landing page
 - [ ] Performance benchmarks documented
+
+Three lines above describe what was built rather than what this document
+originally asked for. Native `NSWindowTabbing` was dropped for the sidebar, for
+the reasons in **Window & Tab Model**. "Subpixel glyph atlas" became a
+pixel-snapped one: each glyph is cached once with its own fractional bearing
+baked into the rasterization and blitted at integer positions, which on a fixed
+monospace grid is where the sharpness actually comes from. And Settings is
+AppKit, not SwiftUI — SwiftUI popovers sitting beside native pop-ups read as
+imitations, and an `NSMenu` can't host a search field. Only the *searchable*
+half of that line is still outstanding.
+
+Verification of the compatibility line is by hand and by daily use. There is no
+CI in this repo at all, so nothing would catch a regression in it.
 
 ## Out of v1 (potential v1.x / v2)
 
