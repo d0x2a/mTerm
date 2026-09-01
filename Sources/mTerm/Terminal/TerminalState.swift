@@ -1589,12 +1589,21 @@ final class TerminalState: ParserSink {
     }
 
     /// Blanks `count` cells starting at `index`, building the blank once rather
-    /// than per cell. `Cell()` consults the theme — a lock plus a Theme copy,
-    /// see Cell.init — so a per-column `Cell()` made a full-screen erase cost
-    /// one lock acquisition per cell.
+    /// than per cell. The blank still leaves its foreground unset, and Cell.init
+    /// consults the theme for a missing colour — a lock plus a Theme copy — so
+    /// building one per column made a full-screen erase cost one lock
+    /// acquisition per cell.
     private func blankCells(from index: Int, count: Int) {
         guard count > 0 else { return }
-        let blankCell = Cell()
+        // Back-colour erase (BCE): erased cells take the *current* SGR
+        // background, not the theme's. xterm-256color advertises `bce`, so
+        // apps paint a band by setting a background and erasing rather than
+        // writing spaces across it — ratatui, vim status lines and htop all
+        // do. Blanking to the theme background left those bands unpainted
+        // except for whatever cells were written explicitly.
+        // Foreground stays the default: a blank has no glyph, and carrying
+        // the current one would tint it if the cell were later inverted.
+        let blankCell = Cell(bg: currentBg)
         cells.withUnsafeMutableBufferPointer { buf in
             (buf.baseAddress! + index).update(repeating: blankCell, count: count)
         }
