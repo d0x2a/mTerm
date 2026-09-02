@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>mTerm — a native macOS terminal</title>
+<meta name="description" content="A native macOS terminal emulator. Opinionated, GPU-accelerated, focused. Open source under the MIT license; requires macOS 14 or later.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="mTerm — a native macOS terminal">
+<meta property="og:description" content="A native macOS terminal emulator. Opinionated, GPU-accelerated, focused. Open source under the MIT license; requires macOS 14 or later.">
+<meta property="og:image" content="renderer.png">
+<style>
+  :root {
+    --bg: #f9f9f8;
+    --ink: #1d1d1f;
+    --muted: #6b6b70;
+    --rule: #e2e2e0;
+    --surface: #efefed;
+    --accent: #1f7a3a;
+    --accent-hover: #196330;
+    --accent-ink: #ffffff;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --ink: #ececee;
+      --muted: #9b9ba1;
+      --rule: #37373b;
+      --surface: #28282b;
+      --accent: #5fc46e;
+      --accent-hover: #74d283;
+      --accent-ink: #0f1a12;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { font-size: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    text-rendering: optimizeLegibility;
+  }
+  @media (max-width: 40rem) {
+    body { font-size: 1rem; }
+  }
+
+  a { color: inherit; text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 0.15em; }
+  a:hover { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  code, kbd, pre { font-family: var(--mono); }
+  code { font-size: 0.92em; background: var(--surface); padding: 0.1em 0.35em; border-radius: 4px; }
+  pre { margin: 0; }
+  pre code { display: block; padding: 0.75rem 1rem; border: 1px solid var(--rule); border-radius: 6px; font-size: 0.95rem; line-height: 1.5; overflow-x: auto; white-space: pre; }
+  .prompt { color: var(--muted); user-select: none; -webkit-user-select: none; }
+
+  h1, h2, h3 { margin: 0; line-height: 1.2; letter-spacing: -0.01em; }
+  h2 { font-size: 1.375rem; font-weight: 600; margin: 4rem 0 1rem; }
+  h3 { font-size: 1rem; font-weight: 600; margin: 0 0 0.75rem; }
+  p { margin: 0 0 1rem; }
+  ul { margin: 0; padding: 0; list-style: none; }
+  li { position: relative; padding-left: 1.25rem; margin: 0 0 0.5rem; }
+  li::before { content: ""; position: absolute; left: 0; top: 0.62em; width: 0.4em; height: 0.4em; background: var(--accent); }
+
+  .container { max-width: 64rem; margin: 0 auto; padding: 0 1.5rem; }
+  .prose { max-width: 40rem; }
+  .note { color: var(--muted); font-size: 0.9rem; }
+  .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+  /* Hero */
+  .hero { padding-top: 4rem; }
+  .masthead { display: flex; justify-content: space-between; align-items: baseline; gap: 1.5rem; flex-wrap: wrap; }
+  .wordmark { font-family: var(--mono); font-size: clamp(3rem, 7vw, 4.5rem); font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
+  .cursor { display: inline-block; width: 0.5em; height: 0.9em; margin-left: 0.1em; vertical-align: -0.05em; background: var(--accent); animation: blink 1.2s steps(1, end) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+  .repo { font-size: 0.95rem; color: var(--muted); text-decoration-color: var(--rule); }
+  .repo:hover { color: var(--accent); text-decoration-color: var(--accent); }
+  .tagline { font-size: 1.3rem; line-height: 1.4; margin: 1.5rem 0 0; max-width: 40rem; }
+
+  .install {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 26rem));
+    gap: 2rem 3rem;
+    margin-top: 2.5rem;
+    padding: 2rem 0;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .install p:last-child { margin-bottom: 0; }
+  .button {
+    display: inline-block;
+    padding: 0.6rem 1rem;
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-radius: 6px;
+    font-weight: 600;
+    text-decoration: none;
+    line-height: 1.3;
+  }
+  .button:hover { background: var(--accent-hover); color: var(--accent-ink); }
+
+  /* Screenshots */
+  .shot { margin: 3.5rem 0 0; }
+  .shot .frame { margin: 0; }
+  .shot img { display: block; width: 100%; max-width: 100%; height: auto; }
+  .shot figcaption { color: var(--muted); font-size: 0.9rem; max-width: 40rem; margin-top: 0.25rem; }
+  /* Each PNG carries its own transparent gutter around the window; at wide
+     widths pull the image out by exactly that much so the window edge lines
+     up with the text column. */
+  @media (min-width: 72rem) {
+    .shot-renderer .frame { margin: 0 -5.1% 0 -5.3%; }
+    .shot-session .frame { margin: 0 -3.9%; }
+  }
+
+  /* Features */
+  .features { font-size: 0.95rem; line-height: 1.5; }
+  .features li { margin-bottom: 0.55rem; }
+  .features li::before { top: 0.55em; }
+
+  /* Shortcuts */
+  .table-scroll { overflow-x: auto; max-width: 40rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 0.5rem 1.5rem 0.5rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; border-bottom-color: var(--ink); }
+  td:last-child, th:last-child { padding-right: 0; white-space: nowrap; }
+  kbd { font-family: inherit; font-weight: 500; }
+
+  /* Footer */
+  footer { margin-top: 5rem; padding: 2rem 0 3rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.9rem; }
+  footer p { margin: 0 0 0.35rem; }
+</style>
+</head>
+<body>
+
+<header class="hero container">
+  <div class="masthead">
+    <h1 class="wordmark">mTerm<span class="cursor" aria-hidden="true"></span></h1>
+    <a class="repo" href="https://github.com/d0x2a/mTerm">Source on GitHub</a>
+  </div>
+  <p class="tagline">A native macOS terminal emulator.<br>Opinionated, GPU-accelerated, focused.</p>
+
+  <h2 class="sr-only">Install</h2>
+  <div class="install">
+    <div>
+      <h3>Homebrew</h3>
+      <pre><code><span class="prompt" aria-hidden="true">$ </span>brew install --cask d0x2a/tap/mterm</code></pre>
+      <p class="note">The recommended way to install.</p>
+    </div>
+    <div>
+      <h3>Signed DMG</h3>
+      <p><a class="button" href="https://github.com/d0x2a/mTerm/releases/latest">Download the latest release</a></p>
+      <p class="note">A universal binary, signed with a Developer ID and notarized by Apple, so Gatekeeper accepts it on first launch. Drag mTerm.app to /Applications.</p>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <figure class="shot shot-renderer">
+    <div class="frame">
+      <img src="renderer.png" width="1472" height="1177" alt="mTerm running scripts/rendercheck.sh: bold, italic, underlined and inverse text, a truecolor gradient, the 256-colour palette, emoji, and double-width Japanese text">
+    </div>
+    <figcaption><code>scripts/rendercheck.sh</code> — bold, italic, underline, faint and inverse, truecolor, the 256-colour palette, emoji, double-width CJK and combining marks, all in one screen.</figcaption>
+  </figure>
+
+  <section class="prose">
+    <h2>Why</h2>
+    <p>mTerm is an alternative to iTerm2 for developers who want:</p>
+    <ul>
+      <li>A terminal that feels like a real Mac app, not a port.</li>
+      <li>GPU-class rendering (Ghostty/Alacritty territory).</li>
+      <li>A small, sharp feature set instead of a thousand preferences.</li>
+    </ul>
+  </section>
+
+  <section class="prose">
+    <h2>Features</h2>
+    <ul class="features">
+      <li>AppKit-native window with a tabbed sidebar you can drag to reorder, full screen, and session restore of tabs and working directories.</li>
+      <li>Metal-rendered text through a pixel-snapped glyph atlas: crisp at every size, with no GPU filtering blur.</li>
+      <li>Bold and italic use the font's own faces, never a synthesised slant or smear, and all four faces share one advance so columns never drift. Underline, faint and inverse work too, including the codes that turn each of them back off.</li>
+      <li>Resizing reflows the buffer: wrapped lines rejoin and re-split at the new width instead of being cut off, and a readout shows the grid size while you drag.</li>
+      <li>xterm-256color compatibility for vim, neovim, htop, fzf, less and git pagers, with 24-bit colour, the alternate screen, scroll regions, DEC line drawing and synchronized output (DEC 2026) so multi-line redraws land in one frame.</li>
+      <li>Mouse reporting in SGR and legacy encodings for click, drag, motion and wheel (hold ⇧ to select instead), plus bracketed paste, focus events and cursor-position reports.</li>
+      <li>East Asian and fullwidth characters take their proper two columns, and combining marks compose into the glyph they follow, so CJK text stays in step with the shell's own cursor arithmetic.</li>
+      <li>Scrollback search: plain text by default, regex via ⌥⌘F, smart-case.</li>
+      <li>Prompt markers in the gutter, colour-coded by exit status, and ⌘↑ / ⌘↓ to jump to the previous or next prompt.</li>
+      <li>Themes: Tomorrow Night, Solarized light and dark, Nord, Dracula, Gruvbox Dark, and mTerm's own light and dark. Import any iTerm2 <code>.itermcolors</code> file. The sidebar tints to the active theme, and light/dark switching follows the system appearance.</li>
+      <li>macOS notifications for terminal attention events (bell, OSC 9, OSC 777), configurable in Settings.</li>
+      <li>⌘-click opens links: URLs with or without a scheme go to the browser, and file paths are revealed in Finder. Only the link under the pointer is highlighted, and only paths that exist on disk are offered.</li>
+      <li>Close confirmation when a foreground process such as vim or ssh is running, which you can turn off.</li>
+      <li>Font family, size, stroke weight and line spacing (1.0×–2.0×, default 1.15×) all adjust live from the Settings window.</li>
+      <li>Shell integration for zsh, bash and fish.</li>
+      <li>Profiles: a name, a command, a starting directory, environment variables and an optional theme override.</li>
+      <li>A triggers editor: match a pattern in output and highlight it, make it clickable, or run a command.</li>
+      <li>tmux control mode (<code>tmux -CC</code>), with each tmux window as a native tab.</li>
+      <li>Searchable Settings.</li>
+      <li>Configurable scrollback size.</li>
+    </ul>
+  </section>
+
+  <figure class="shot shot-session">
+    <div class="frame">
+      <img src="session.png" width="1472" height="732" loading="lazy" alt="mTerm showing a git log in the repository, with the tab sidebar on the left">
+    </div>
+    <figcaption>A git log in the repository, with the tab sidebar on the left.</figcaption>
+  </figure>
+
+  <section class="prose">
+    <h2>What it is not</h2>
+    <p>mTerm is not trying to be Warp. There are no AI features, no command palettes that rethink the shell, and no cloud accounts. There are no split panes either: one shell per tab, and tmux inside a tab when you want panes.</p>
+  </section>
+
+  <section class="prose">
+    <h2>Keyboard shortcuts</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th scope="col">Action</th><th scope="col">Shortcut</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>New tab</td><td><kbd>⌘T</kbd></td></tr>
+          <tr><td>Close tab</td><td><kbd>⌘W</kbd></td></tr>
+          <tr><td>Next / previous tab</td><td><kbd>⌘⇧]</kbd> / <kbd>⌘⇧[</kbd> <span class="note">(also <kbd>⌘`</kbd> / <kbd>⌘⇧`</kbd>)</span></td></tr>
+          <tr><td>Jump to tab N</td><td><kbd>⌘1</kbd> – <kbd>⌘9</kbd> <span class="note">(⌘9 = last)</span></td></tr>
+          <tr><td>Find in scrollback</td><td><kbd>⌘F</kbd></td></tr>
+          <tr><td>Find (regex)</td><td><kbd>⌥⌘F</kbd></td></tr>
+          <tr><td>Next / previous match</td><td><kbd>⌘G</kbd> / <kbd>⇧⌘G</kbd></td></tr>
+          <tr><td>Jump previous / next prompt</td><td><kbd>⌘↑</kbd> / <kbd>⌘↓</kbd></td></tr>
+          <tr><td>Toggle full screen</td><td><kbd>⌃⌘F</kbd></td></tr>
+          <tr><td>Open Settings</td><td><kbd>⌘,</kbd></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer class="container">
+  <p>MIT license. <a href="https://github.com/d0x2a/mTerm">github.com/d0x2a/mTerm</a></p>
+  <p>Requires macOS 14 or later. Universal binary (Apple silicon and Intel).</p>
+</footer>
+
+</body>
+</html>
