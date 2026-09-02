@@ -1646,7 +1646,14 @@ final class TerminalState: ParserSink {
         let lines = min(n, bottom - top + 1)
         guard lines > 0 else { return }
 
-        if toScrollback && !usingAlt && top == 0 && bottom == rows - 1 {
+        // A line only leaves the screen for good when the region starts at the
+        // top, but the bottom margin has nothing to do with it: an app that
+        // parks its live UI at the bottom and scrolls the region above it
+        // (CSI 1;8r — ratatui's inline viewport, which is how codex emits
+        // finished output) is feeding us history exactly like a full-screen
+        // scroll does. Requiring the whole screen here dropped it on the floor,
+        // leaving nothing to scroll back to.
+        if toScrollback && !usingAlt && top == 0 {
             pushToScrollback(lines)
         }
         if top == 0 && bottom == rows - 1 {
@@ -1780,13 +1787,31 @@ final class TerminalState: ParserSink {
                 rowWrapped[ringRow(r)] = false
             }
             blankCells(from: rowBase(cursorRow), count: min(cursorCol, cols - 1) + 1)
-        case 2, 3:
+        case 2:
             // Every row is cleared, so ring order doesn't matter here.
             blankCells(from: 0, count: cells.count)
             for i in rowWrapped.indices { rowWrapped[i] = false }
+            holdForRepaintAfterErase()
+        case 3:
+            // xterm's "erase saved lines": the scrollback goes, the grid stays.
+            // This is how `clear` empties history, and how codex rebuilds its
+            // transcript on resize — purge, then re-emit at the new width.
+            // Treating it as another screen clear left every pre-resize copy
+            // in place, one more per drag.
+            clearScrollback()
         default:
             break
         }
+    }
+
+    /// Drops every saved row. `scrolledRows` keeps counting so absolute line
+    /// numbers taken before the purge — a selection, a prompt mark — still name
+    /// the same line; they just no longer resolve to anything.
+    private func clearScrollback() {
+        scrollbackStore.removeAll(keepingCapacity: true)
+        scrollbackWrapped.removeAll(keepingCapacity: true)
+        scrollbackStart = 0
+        scrollbackCount = 0
     }
 
     /// DCH: deletes `count` cells at the cursor, shifting the rest of the line
