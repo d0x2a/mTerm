@@ -180,7 +180,7 @@ final class TerminalState: ParserSink {
     private var scrollbackWrapped: [Bool] = []
     private var scrollbackStart = 0      // ring slot holding the oldest row
     private var scrollbackCount = 0
-    private let maxScrollback: Int = 10_000
+    private let maxScrollback: Int
 
     // Absolute line numbering — every row ever pushed into scrollback bumps this
     // counter. Together with cursorRow it gives a unique, stable identifier for
@@ -336,9 +336,15 @@ final class TerminalState: ParserSink {
     /// deliberately not in CellAttrs: SGR 0 does not close a hyperlink.
     private var currentLink: UInt16 = 0
 
-    init(cols: Int, rows: Int) {
+    /// `scrollback` defaults to the configured depth. It is fixed for the life
+    /// of the buffer — the ring is sized here — so a change in Settings reaches
+    /// the tabs opened after it rather than reallocating the history of every
+    /// live one.
+    init(cols: Int, rows: Int,
+         scrollback: Int = ThemeStore.shared.settings.scrollbackLines) {
         self.cols = max(1, cols)
         self.rows = max(1, rows)
+        self.maxScrollback = max(0, scrollback)
         self.scrollBottom = self.rows - 1
         let theme = ThemeStore.currentTheme
         self.currentFg = PackedColor(theme.foreground)
