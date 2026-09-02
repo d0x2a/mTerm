@@ -2086,7 +2086,7 @@ final class TerminalState: ParserSink {
         //    carrying something, or the cursor's row if it sits below that.
         var lastMeaningful = -1
         for (k, row) in rebuilt.enumerated()
-        where Self.trimmedCount(row.cells, blank: blank) > 0 {
+        where Self.paintedCount(row.cells, blank: blank) > 0 {
             lastMeaningful = k
         }
         lastMeaningful = max(lastMeaningful, newCursorRowIndex)
@@ -2122,6 +2122,17 @@ final class TerminalState: ParserSink {
             let row = rebuilt[k].cells
             let copy = min(newCols, row.count)
             for c in 0..<copy { newCells[r * newCols + c] = row[c] }
+            // A band painted to the old edge continues to the new one. The
+            // row's last cell says which: no glyph but a look of its own is
+            // erase-to-end-of-line fill, not a character typed at the margin.
+            if copy < newCols, let last = row.last,
+               last.scalar == blank.scalar, last.width == blank.width,
+               last.bg != blank.bg || last.attrs != blank.attrs {
+                var fill = Cell(bg: last.bg)
+                fill.attrs = last.attrs
+                fill.fg = last.fg
+                for c in copy..<newCols { newCells[r * newCols + c] = fill }
+            }
             newWrapped[r] = rebuilt[k].wrapped
         }
 
@@ -2142,7 +2153,29 @@ final class TerminalState: ParserSink {
     /// Length of `row` ignoring the run of untouched blanks at its end. A cell
     /// carrying a background color or an attribute is not blank — counting it
     /// out would lose the paint — so only wholly default cells are trimmed.
+    /// Columns a row occupies for wrapping. Trailing cells with no glyph are
+    /// padding whatever colour they carry: an app that sets a background and
+    /// erases to the end of the line has painted a band that ends at the
+    /// edge, not written `cols` characters. Counting those cells as content
+    /// made every band wrap on a narrowing — a full row plus a stub for the
+    /// overhang — and a window drag, which narrows one column at a time,
+    /// grew a stub per step and pushed a row of text into history for each.
+    /// The same goes for inverse or underlined blanks: a status bar drawn as a
+    /// run of inverse spaces is a band to the edge, and would stub the same way.
     private static func trimmedCount(_ row: [Cell], blank: Cell) -> Int {
+        var end = row.count
+        while end > 0 {
+            let c = row[end - 1]
+            guard c.scalar == blank.scalar, c.width == blank.width else { break }
+            end -= 1
+        }
+        return end
+    }
+
+    /// Columns a row occupies on screen, colour included — the measure for
+    /// deciding whether a row is worth keeping at all. A band with no text
+    /// is still something the user sees.
+    private static func paintedCount(_ row: [Cell], blank: Cell) -> Int {
         var end = row.count
         while end > 0 {
             let c = row[end - 1]
