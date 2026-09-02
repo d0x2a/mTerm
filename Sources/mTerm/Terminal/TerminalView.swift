@@ -54,8 +54,27 @@ final class TerminalView: NSView, CALayerDelegate {
     /// cell boundary doesn't re-announce the same dimensions.
     private var lastReportedGrid: (cols: Int, rows: Int)?
 
-    private var scrollOffset: Int = 0
+    private var scrollOffset: Int = 0 {
+        didSet {
+            guard scrollOffset != oldValue else { return }
+            showScrollIndicator()
+        }
+    }
     private var scrollResidue: CGFloat = 0
+
+    /// Overlay scroll indicator: a capsule on the right edge that appears while
+    /// you scroll and fades out again, the way macOS overlay scrollbars do.
+    /// Purely an indicator — it never takes a click, so it can't eat a
+    /// selection drag that starts near the edge.
+    private lazy var scrollIndicator: NSView = {
+        let view = ScrollIndicatorView()
+        view.wantsLayer = true
+        view.layer?.cornerRadius = ScrollIndicatorView.width / 2
+        view.alphaValue = 0
+        addSubview(view)
+        return view
+    }()
+    private var scrollIndicatorFade: DispatchWorkItem?
     private var lastScrollbackLines: Int = 0
     private var lastSnapshotCols: Int = 1
     private var lastSnapshotRows: Int = 1
@@ -215,6 +234,7 @@ final class TerminalView: NSView, CALayerDelegate {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
+        layoutScrollIndicator()
         // The surface sized its drawable in its own setFrameSize, which AppKit
         // runs before laying us out, so the grid below reads the new size.
         resizeSessionIfNeeded()
@@ -840,6 +860,47 @@ final class TerminalView: NSView, CALayerDelegate {
         scrollOffset = max(0, min(next, lastScrollbackLines))
     }
 
+    // MARK: scroll indicator
+
+    /// Brings the indicator up and restarts its fade. Called for user-driven
+    /// scrolls only — output arriving shouldn't blink a scrollbar at someone
+    /// who is just watching a build run.
+    private func showScrollIndicator() {
+        guard lastScrollbackLines > 0 else {
+            scrollIndicator.alphaValue = 0
+            return
+        }
+        layoutScrollIndicator()
+        scrollIndicatorFade?.cancel()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            scrollIndicator.animator().alphaValue = 1
+        }
+        let fade = DispatchWorkItem { [weak self] in
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.35
+                self?.scrollIndicator.animator().alphaValue = 0
+            }
+        }
+        scrollIndicatorFade = fade
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: fade)
+    }
+
+    /// Sizes and places the thumb, and tints it for the current theme.
+    private func layoutScrollIndicator() {
+        guard let frame = ScrollIndicatorView.thumbFrame(in: bounds,
+                                                        scrollOffset: scrollOffset,
+                                                        scrollbackLines: lastScrollbackLines,
+                                                        viewportRows: lastSnapshotRows)
+        else { return }
+        scrollIndicator.frame = frame
+        let fg = ThemeStore.currentTheme.foreground
+        scrollIndicator.layer?.backgroundColor = NSColor(srgbRed: CGFloat(fg.x),
+                                                         green: CGFloat(fg.y),
+                                                         blue: CGFloat(fg.z),
+                                                         alpha: 0.35).cgColor
+    }
+
     // MARK: context menu
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -1236,6 +1297,10 @@ final class TerminalView: NSView, CALayerDelegate {
         if scrollOffset > lastScrollbackLines {
             scrollOffset = lastScrollbackLines
         }
+        // While it's on screen the thumb has to track output arriving under it.
+        // Gated on the fade so tabs that have never been scrolled don't build
+        // the indicator at all.
+        if scrollIndicatorFade != nil { layoutScrollIndicator() }
         let fgProcess = session?.foregroundProcess()?.name
         if snapshot.title != lastReportedTitle
             || snapshot.currentDirectory != lastReportedCwd
