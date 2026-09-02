@@ -18,6 +18,13 @@ final class Pty {
     private var writeSource: DispatchSourceWrite?
     private var writeSourceActive = false
 
+    /// Last answer from foregroundProcess(), which renderFrame asks for every
+    /// frame. Resolving the group leader to the real command walks the process
+    /// table (~30µs), so only redo it when the foreground group changes or the
+    /// answer goes stale. Main-thread only, like its one caller.
+    private var cachedForeground: (pgid: pid_t, pid: pid_t, name: String, at: CFAbsoluteTime)?
+    private static let foregroundCacheTTL: CFAbsoluteTime = 0.5
+
     private init(masterFd: Int32, pid: pid_t) {
         self.masterFd = masterFd
         self.pid = pid
@@ -143,9 +150,19 @@ final class Pty {
         let pgid = tcgetpgrp(masterFd)
         guard pgid > 0, pgid != pid else { return nil }
 
+        let now = CFAbsoluteTimeGetCurrent()
+        if let cached = cachedForeground,
+           cached.pgid == pgid,
+           now - cached.at < Self.foregroundCacheTTL {
+            return (cached.pid, cached.name)
+        }
+
+        // The group leader is often only a wrapper — `codex` is an npm shim
+        // whose leader is `node` — so name the command it actually started.
+        let fg = mterm_foreground_pid(pgid)
         var buf = [CChar](repeating: 0, count: 256)
         let n = buf.withUnsafeMutableBufferPointer { ptr in
-            mterm_proc_name(pgid, ptr.baseAddress, Int32(ptr.count))
+            mterm_proc_name(fg, ptr.baseAddress, Int32(ptr.count))
         }
         let name: String
         if n > 0, let s = String(validatingUTF8: buf), !s.isEmpty {
@@ -154,6 +171,7 @@ final class Pty {
             // Lookup failed but the pgid is real — still report the process.
             name = "a process"
         }
-        return (pgid, name)
+        cachedForeground = (pgid, fg, name, now)
+        return (fg, name)
     }
 }

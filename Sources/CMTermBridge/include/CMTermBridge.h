@@ -25,6 +25,14 @@ int mterm_set_winsize(int fd, unsigned short rows, unsigned short cols);
 // 0 if the lookup failed (process exited, permission denied, etc).
 int mterm_proc_name(pid_t pid, char *buf, int len);
 
+// Resolves the process group `pgid` to the command actually running in it:
+// the deepest descendant of the group leader that is still in the group.
+// Wrappers keep the leadership and fork the real program (npm and node shims,
+// `script`, `env`), so the leader's name is often not what the user thinks is
+// running — codex's leader is the `node` wrapper that spawned the real binary.
+// Returns `pgid` unchanged when the walk finds nothing better.
+pid_t mterm_foreground_pid(pid_t pgid);
+
 #ifdef __cplusplus
 }
 #endif
