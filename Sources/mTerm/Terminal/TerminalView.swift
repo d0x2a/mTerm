@@ -800,24 +800,40 @@ final class TerminalView: NSView, CALayerDelegate {
         if rowDelta == 0 { return }
         scrollResidue -= CGFloat(rowDelta) * pointsPerRow
 
-        // An app that asked for tracking gets the wheel as button 64/65
-        // presses instead of scrolling our own viewport.
-        if scrollOffset == 0,
-           !event.modifierFlags.contains(.shift),
-           let session,
-           session.inputModes.mouseTracking != .off {
-            let coord = self.coord(of: event)
-            let button = rowDelta > 0 ? MouseReport.wheelUp : MouseReport.wheelDown
+        // Shift is the escape hatch: it always scrolls our own viewport, even
+        // when the child would otherwise own the wheel.
+        if scrollOffset == 0, !event.modifierFlags.contains(.shift), let session {
             let modes = session.inputModes
-            for _ in 0..<min(abs(rowDelta), 8) {
-                if let bytes = MouseReport.bytes(kind: .press, button: button,
-                                                 col: coord.col, row: coord.row,
-                                                 tracking: modes.mouseTracking,
-                                                 encoding: modes.mouseEncoding) {
-                    session.write(bytes)
+
+            // An app that asked for tracking gets the wheel as button 64/65
+            // presses instead of scrolling our own viewport.
+            if modes.mouseTracking != .off {
+                let coord = self.coord(of: event)
+                let button = rowDelta > 0 ? MouseReport.wheelUp : MouseReport.wheelDown
+                for _ in 0..<min(abs(rowDelta), 8) {
+                    if let bytes = MouseReport.bytes(kind: .press, button: button,
+                                                     col: coord.col, row: coord.row,
+                                                     tracking: modes.mouseTracking,
+                                                     encoding: modes.mouseEncoding) {
+                        session.write(bytes)
+                    }
                 }
+                return
             }
-            return
+
+            // ?1007 alternate scroll. A full-screen app that doesn't track the
+            // mouse still expects the wheel, and the alt screen has no
+            // scrollback for us to move instead — so the wheel goes down as
+            // cursor keys, one per row. This is how less, man and codex scroll.
+            if modes.usingAltScreen, modes.alternateScroll {
+                let final: UInt8 = rowDelta > 0 ? 0x41 : 0x42   // CSI A / CSI B
+                var bytes: [UInt8] = []
+                for _ in 0..<min(abs(rowDelta), 8) {
+                    bytes += [0x1B, 0x5B, final]
+                }
+                session.write(bytes)
+                return
+            }
         }
 
         let next = scrollOffset + rowDelta

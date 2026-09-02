@@ -113,6 +113,8 @@ final class Session {
         let reportFocus: Bool
         let mouseTracking: MouseTracking
         let mouseEncoding: MouseEncoding
+        let alternateScroll: Bool
+        let usingAltScreen: Bool
     }
 
     var inputModes: InputModes {
@@ -120,7 +122,9 @@ final class Session {
             InputModes(bracketedPaste: state.bracketedPaste,
                        reportFocus: state.reportFocus,
                        mouseTracking: state.mouseTracking,
-                       mouseEncoding: state.mouseEncoding)
+                       mouseEncoding: state.mouseEncoding,
+                       alternateScroll: state.alternateScroll,
+                       usingAltScreen: state.usingAlt)
         }
     }
 

@@ -204,6 +204,12 @@ final class TerminalState: ParserSink {
     private(set) var reportFocus: Bool = false      // ?1004
     private(set) var mouseTracking: MouseTracking = .off
     private(set) var mouseEncoding: MouseEncoding = .x10
+    /// ?1007 — while the alt screen is up, the wheel is sent as cursor keys.
+    /// On by default, like every terminal a full-screen app expects to be
+    /// running under: the alt screen keeps no scrollback of its own, so a
+    /// program that doesn't track the mouse (less, man, codex) has no other
+    /// way to hear about the wheel.
+    private(set) var alternateScroll: Bool = true   // ?1007
 
     // Tab stops as a set of columns; every 8 by default, but HTS/TBC let the
     // child place its own.
@@ -287,7 +293,7 @@ final class TerminalState: ParserSink {
 
     // Alt-screen support. When usingAlt is true, `cells` is the alt buffer
     // and `stashed*` holds the primary state.
-    private var usingAlt: Bool = false
+    private(set) var usingAlt: Bool = false
     private var stashedCells: [Cell] = []
     private var stashedRowWrapped: [Bool] = []
     private var stashedCursor: (col: Int, row: Int) = (0, 0)
@@ -1393,6 +1399,8 @@ final class TerminalState: ParserSink {
                 reportFocus = set
             case 1006:
                 mouseEncoding = set ? .sgr : .x10
+            case 1007:
+                alternateScroll = set
             case 2004:
                 bracketedPaste = set
             case 2026:                              // synchronized output
@@ -1440,6 +1448,12 @@ final class TerminalState: ParserSink {
 
     private func enterAltScreen(clear: Bool) {
         if usingAlt { return }
+        // ?1007 only means anything while the alt screen is up, so each
+        // full-screen session starts from our default. Without this an app
+        // that turns alternate scroll off on its way out (codex does) leaves
+        // the wheel dead in the *next* one — and teardown order isn't
+        // reliable enough to undo it when the alt screen is left instead.
+        alternateScroll = true
         // Stash the primary grid in logical order. A ring offset kept beside
         // it would have to survive a resize, which reflows stashedCells and
         // would leave the offset describing the old geometry.
@@ -1507,6 +1521,7 @@ final class TerminalState: ParserSink {
         reportFocus = false
         mouseTracking = .off
         mouseEncoding = .x10
+        alternateScroll = true
         charsets = [0x42, 0x42]
         activeCharset = 0
         tabStops = Self.defaultTabStops(cols: cols)
