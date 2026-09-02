@@ -239,6 +239,23 @@ final class TerminalState: ParserSink {
     private(set) var title: String = ""
     private(set) var currentDirectory: String? = nil
 
+    /// A full-screen erase is the first half of a repaint, and an app that
+    /// wraps the repaint in a synchronized update doesn't always wrap the
+    /// erase: codex flushes `2J`/`3J` on its own, outside the bracket, and
+    /// only opens ?2026 for the re-emission that follows. Between the two the
+    /// grid is empty and the gate is open, and any of the three present paths
+    /// that ran in that window put a blank screen up for a frame — on every
+    /// resize. So an erase opens a short hold of its own. The app's ?2026h
+    /// replaces it with the real deadline, its ?2026l ends it, and if nothing
+    /// follows — `clear` at an idle prompt — the timeout lets the blank
+    /// screen through after a delay no one can see.
+    private static let eraseHoldTimeout: CFAbsoluteTime = 0.08
+
+    private func holdForRepaintAfterErase() {
+        guard syncUpdateDeadline == nil else { return }
+        syncUpdateDeadline = CFAbsoluteTimeGetCurrent() + Self.eraseHoldTimeout
+    }
+
     /// True while the child holds a synchronized update open (DEC 2026), until
     /// the safety deadline passes.
     var synchronizedUpdateActive: Bool {

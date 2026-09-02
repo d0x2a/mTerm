@@ -222,7 +222,21 @@ final class TerminalView: NSView, CALayerDelegate {
         // the present lands in the same CA transaction as the layout change,
         // so the divider/window drag stays smooth instead of stretching the
         // previous frame until the next display-link tick.
-        renderFrame()
+        //
+        // Through the synchronized-update gate, though, like the other two
+        // present paths. A drag lands in the middle of a full-screen app's
+        // repaint — codex answers every SIGWINCH by erasing the screen and
+        // re-emitting its whole transcript — and presenting direct from here
+        // put the erased screen and the half-written rows on screen once per
+        // frame for the length of the drag. Held frames go out on the next
+        // tick, the moment the update closes.
+        needsFrame = true
+        guard let frame = session?.publishedFrame(scrollOffset: scrollOffset) else {
+            renderFrame()
+            return
+        }
+        if frame.synchronizedUpdateActive { return }
+        renderFrame(using: frame.snapshot)
     }
 
     // MARK: input
@@ -691,12 +705,33 @@ final class TerminalView: NSView, CALayerDelegate {
     private func sessionDidOutput() {
         needsFrame = true
         guard CACurrentMediaTime() - lastPresentTime >= frameInterval else { return }
-        // Honour the synchronized-update gate here too. Cutting latency means
-        // presenting as soon as output lands, but "output" is just as likely
-        // to be the first half of a frame the child hasn't finished drawing —
-        // and this path presented it regardless, which is what made a TUI's
-        // composer blink out between its erase and its repaint. `needsFrame`
-        // stays set, so the tick presents the finished frame when it closes.
+        // Let the burst settle before presenting. A chunk is as likely to be
+        // the first piece of a redraw as the whole of it, and one shape is
+        // common enough to matter: codex flushes a bare erase-screen — outside
+        // its synchronized update, on purpose — and follows it a moment later
+        // with the sync-bracketed repaint. Presenting the erase the instant it
+        // landed showed a blank screen for a frame on every resize. Waiting a
+        // few milliseconds folds the two together, and by then the bracket is
+        // open and the gate below holds. A keystroke echo pays those few
+        // milliseconds; under a firehose the tick presents every frame anyway.
+        pendingOutputPresent?.cancel()
+        let present = DispatchWorkItem { [weak self] in self?.presentSettledOutput() }
+        pendingOutputPresent = present
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.outputSettleInterval,
+                                      execute: present)
+    }
+
+    private var pendingOutputPresent: DispatchWorkItem?
+    private static let outputSettleInterval: TimeInterval = 0.003
+
+    private func presentSettledOutput() {
+        pendingOutputPresent = nil
+        guard needsFrame else { return }
+        // Honour the synchronized-update gate here too: "output" is just as
+        // likely to be the first half of a frame the child hasn't finished
+        // drawing, and presenting it regardless is what made a TUI's composer
+        // blink out between its erase and its repaint. `needsFrame` stays set,
+        // so the tick presents the finished frame when the update closes.
         guard let frame = session?.publishedFrame(scrollOffset: scrollOffset) else {
             renderFrame()
             return
@@ -1103,6 +1138,10 @@ final class TerminalView: NSView, CALayerDelegate {
 
     private func resizeSessionIfNeeded() {
         guard let session, let (cols, rows) = gridDimensions() else { return }
+        // The child hears about every grid change, mid-drag included, the way
+        // Terminal.app does it. A full-screen app that re-renders on SIGWINCH
+        // then keeps its own wrapping on screen throughout the drag instead of
+        // showing our character-level reflow until the drag ends.
         session.resize(cols: cols, rows: rows)
         // Only on an actual change: a drag inside one cell fires setFrameSize
         // repeatedly with the same grid, and the readout shouldn't blink.
@@ -1129,7 +1168,6 @@ final class TerminalView: NSView, CALayerDelegate {
         // While the child holds a synchronized update open (DEC 2026), hold the
         // last frame: apps that redraw several lines per frame — Homebrew's
         // download list, say — would otherwise be sampled mid-redraw and tear.
-        // A resize still presents, since setFrameSize calls renderFrame direct.
         //
         // The flag and the grid are taken together. Read separately, the queue
         // could publish a new frame between the two, so a tick that cleared the
