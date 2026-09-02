@@ -54,10 +54,27 @@ struct AppSettings: Codable, Equatable {
     /// (window key, app active, tab selected). Off = always notify.
     var notifyOnlyWhenUnfocused: Bool = true
 
+    /// Rows of history kept per tab. Each row costs 16 bytes a column, so
+    /// 10,000 rows at 200 columns is 32 MB — see docs/BENCHMARKS.md.
+    var scrollbackLines: Int = 10_000
+    /// The choices offered in Settings. A value from a hand-edited file that
+    /// isn't one of these is still honoured; the picker just shows it as an
+    /// extra entry.
+    static let scrollbackChoices = [1_000, 5_000, 10_000, 25_000, 50_000, 100_000]
+
+    /// Whether new shells get mTerm's prompt hooks (OSC 133 / OSC 7). Off,
+    /// the shell starts exactly as it would from any other terminal and
+    /// jump-to-prompt and relative-path links stop working.
+    var shellIntegrationEnabled: Bool = true
+
+    /// Profile ⌘T opens. nil means the first profile on disk.
+    var defaultProfileId: String? = nil
+
     private enum CodingKeys: String, CodingKey {
         case appearanceMode, lightThemeId, darkThemeId, fontFamily, fontSize,
              strokeWeight, lineHeight, blinkCursor, warnOnCloseWithRunningProcess,
-             notificationsEnabled, notifyOnBell, notifyOnlyWhenUnfocused
+             notificationsEnabled, notifyOnBell, notifyOnlyWhenUnfocused,
+             scrollbackLines, shellIntegrationEnabled, defaultProfileId
         /// Read-only key for migrating old settings; we never write it back.
         case thinStrokes
     }
@@ -76,6 +93,9 @@ struct AppSettings: Codable, Equatable {
         try c.encode(notificationsEnabled, forKey: .notificationsEnabled)
         try c.encode(notifyOnBell, forKey: .notifyOnBell)
         try c.encode(notifyOnlyWhenUnfocused, forKey: .notifyOnlyWhenUnfocused)
+        try c.encode(scrollbackLines, forKey: .scrollbackLines)
+        try c.encode(shellIntegrationEnabled, forKey: .shellIntegrationEnabled)
+        try c.encodeIfPresent(defaultProfileId, forKey: .defaultProfileId)
     }
 
     init() {}
@@ -111,6 +131,13 @@ struct AppSettings: Codable, Equatable {
             try c.decodeIfPresent(Bool.self, forKey: .notifyOnBell) ?? true
         self.notifyOnlyWhenUnfocused =
             try c.decodeIfPresent(Bool.self, forKey: .notifyOnlyWhenUnfocused) ?? true
+        // Clamped rather than trusted: a zero would keep no history at all,
+        // and a number in the millions would be a typo with a memory bill.
+        let lines = try c.decodeIfPresent(Int.self, forKey: .scrollbackLines) ?? 10_000
+        self.scrollbackLines = min(max(lines, 100), 1_000_000)
+        self.shellIntegrationEnabled =
+            try c.decodeIfPresent(Bool.self, forKey: .shellIntegrationEnabled) ?? true
+        self.defaultProfileId = try c.decodeIfPresent(String.self, forKey: .defaultProfileId)
     }
 }
 

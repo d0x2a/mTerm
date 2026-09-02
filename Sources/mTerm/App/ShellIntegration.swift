@@ -1,28 +1,42 @@
 import Darwin
 import Foundation
 
-/// Installs OSC 133 prompt markers into the user's shell so that prompt/command
-/// boundaries can be detected by mTerm. Sets env vars in the current process so
-/// every PTY child inherits them.
+/// Gives a shell mTerm's prompt hooks — OSC 133 prompt markers, which drive
+/// the gutter dots and jump-to-prompt, and OSC 7 for the cwd, which is what
+/// lets a relative path in compiler output become a link.
 ///
-/// Only zsh is supported in v0. The mechanism is the ZDOTDIR trick: we write a
-/// wrapper `.zshrc` into a directory we own, point ZDOTDIR at it, and stash the
-/// user's original ZDOTDIR in MTERM_USER_ZDOTDIR. The wrapper restores the real
-/// ZDOTDIR, re-sources the user's `.zshrc`, then layers in the OSC 133 hooks.
+/// Nothing is written to the user's own rc files. Each shell has a way to
+/// slip a file in front of them:
 ///
-/// Everything here runs on the main thread — `install()` at launch, and
-/// `ensureInstalled()` from `Pty.spawnShell` when a tab opens. That's what makes
-/// the unsynchronised statics and the setenv/unsetenv calls safe.
+/// - **zsh:** `ZDOTDIR` points at a directory we own whose `.zshrc` restores
+///   the real `ZDOTDIR`, sources the user's startup files, then layers the
+///   hooks on top.
+/// - **bash:** `--rcfile` replaces `~/.bashrc` with our wrapper, which sources
+///   the login files (or `~/.bashrc`, for a non-login shell) itself. bash 3.2,
+///   the one in /bin, ignores `$ENV` for interactive shells whatever `--posix`
+///   says, so the rcfile route is the one that works on every bash a Mac has.
+/// - **fish:** a `vendor_conf.d` snippet reached through `XDG_DATA_DIRS`.
+///   fish 4 emits both sequences itself, so the snippet steps aside there and
+///   only fills in for 3.x.
+///
+/// Everything here runs on the main thread from `Pty.spawn`, which is what
+/// makes the unsynchronised statics safe.
 enum ShellIntegration {
-    /// The user's real ZDOTDIR, captured before we overwrite it. nil when they
-    /// don't have one (the common case — zsh then falls back to $HOME).
-    private static var userZdotdir: String?
+    /// argv and environment edits for one spawn.
+    struct Injection {
+        var argv: [String]
+        /// "KEY=VALUE" sets, a bare "KEY" unsets; applied in the child.
+        var env: [String] = []
+    }
 
-    /// True once `install()` has decided the shell is zsh. Cleared by
-    /// `disable()` if we ever fail to get a wrapper onto disk.
-    private static var isActive = false
+    /// Shells whose wrapper has been rewritten this launch. The support
+    /// directory persists across launches, so a wrapper written by an older
+    /// build would otherwise outlive the script it was generated from; one
+    /// forced rewrite per launch keeps them in step, and later spawns only
+    /// stat the file.
+    private static var refreshedThisLaunch = Set<String>()
 
-    /// Where the wrapper lives. Deliberately *not* $TMPDIR: the app routinely
+    /// Where the wrappers live. Deliberately *not* $TMPDIR: the app routinely
     /// outlives a temp file by weeks, and macOS is free to reap that file out
     /// from under a running instance. When that happened, ZDOTDIR still pointed
     /// at the (now empty) directory, so every new tab spawned a zsh that found
@@ -35,87 +49,140 @@ enum ShellIntegration {
         return appSupport.appendingPathComponent("mTerm", isDirectory: true)
     }
 
-    private static var zdotdir: URL? {
-        supportDir?.appendingPathComponent("zdotdir", isDirectory: true)
-    }
-
-    /// Scratch history files, one per live tab. Created and torn down by the
-    /// wrapper itself — the app never touches them, which keeps the shell the
-    /// only writer and avoids racing it on tab close.
+    /// Scratch history files for zsh, one per live tab. Created and torn down
+    /// by the wrapper itself — the app never touches them, which keeps the
+    /// shell the only writer and avoids racing it on tab close.
     private static var historyDir: URL? {
         supportDir?.appendingPathComponent("history", isDirectory: true)
     }
 
-    static func install() {
-        guard let shell = ProcessInfo.processInfo.environment["SHELL"],
-              shell.hasSuffix("/zsh") else { return }
-        let existing = ProcessInfo.processInfo.environment["ZDOTDIR"]
-        userZdotdir = (existing?.isEmpty == false) ? existing : nil
-        isActive = true
-        // Force the rewrite: the directory now persists across launches, so a
-        // wrapper written by an older build would otherwise outlive the script
-        // it was generated from.
-        refresh(force: true)
-    }
-
-    /// Re-asserts the wrapper immediately before a shell is spawned. One `stat`
-    /// per tab is nothing next to a fork+exec, and it means a wrapper that
-    /// disappears mid-session costs a single tab's prompt rather than silently
-    /// degrading every tab until the app is relaunched.
-    static func ensureInstalled() {
-        refresh(force: false)
-    }
-
-    private static func refresh(force: Bool) {
-        guard isActive, let dir = zdotdir else { return }
-        let zshrc = dir.appendingPathComponent(".zshrc")
-        if force || !FileManager.default.fileExists(atPath: zshrc.path) {
-            guard writeWrapper(to: dir, zshrc: zshrc) else {
-                disable()
-                return
-            }
+    /// Works out which shell `path` is and returns the argv and environment
+    /// to start it with, or nil to start it untouched — because integration
+    /// is off, the program isn't a shell we know, or its arguments already
+    /// take charge of its startup files.
+    static func injection(path: String, argv: [String]) -> Injection? {
+        guard ThemeStore.shared.settings.shellIntegrationEnabled else { return nil }
+        var name = (path as NSString).lastPathComponent
+        if name.hasPrefix("-") { name.removeFirst() }
+        switch name {
+        case "zsh":  return zsh(argv: argv)
+        case "bash": return bash(argv: argv)
+        case "fish": return fish(argv: argv)
+        default:     return nil
         }
-        if let user = userZdotdir {
-            setenv("MTERM_USER_ZDOTDIR", user, 1)
+    }
+
+    // MARK: zsh
+
+    private static func zsh(argv: [String]) -> Injection? {
+        guard let dir = supportDir?.appendingPathComponent("zdotdir", isDirectory: true),
+              let history = historyDir,
+              ensureWritten(dir.appendingPathComponent(".zshrc"),
+                            shell: "zsh",
+                            contents: { zshScript(historyDir: history.path) })
+        else { return nil }
+        var env = ["ZDOTDIR=" + dir.path]
+        // The user's real ZDOTDIR, for the wrapper to restore. Read from the
+        // app's own environment, which is never modified — nil when they
+        // don't have one, the common case, and zsh then falls back to $HOME.
+        if let user = ProcessInfo.processInfo.environment["ZDOTDIR"], !user.isEmpty {
+            env.append("MTERM_USER_ZDOTDIR=" + user)
         } else {
-            unsetenv("MTERM_USER_ZDOTDIR")
+            env.append("MTERM_USER_ZDOTDIR")
         }
-        setenv("ZDOTDIR", dir.path, 1)
+        return Injection(argv: argv, env: env)
     }
 
-    /// Hands the shell back to the user's own configuration. Losing OSC 133 is a
-    /// far smaller regression than leaving ZDOTDIR aimed at a directory with no
-    /// `.zshrc` in it, which drops ~/.zshrc and ~/.zprofile along with
-    /// everything they pull in (oh-my-zsh, `brew shellenv`, PATH) — and does it
-    /// silently, because a missing $ZDOTDIR/.zshrc is not an error to zsh.
-    private static func disable() {
-        isActive = false
-        if let user = userZdotdir {
-            setenv("ZDOTDIR", user, 1)
-        } else {
-            unsetenv("ZDOTDIR")
+    // MARK: bash
+
+    private static func bash(argv: [String]) -> Injection? {
+        // Arguments that already decide what bash reads at startup are the
+        // user's call; adding --rcfile on top would either be ignored or
+        // override them.
+        let takesCharge: Set<String> = ["--norc", "--rcfile", "--init-file", "--posix",
+                                        "--noprofile", "-c", "--restricted", "-r"]
+        if argv.dropFirst().contains(where: { takesCharge.contains($0) }) { return nil }
+        guard let dir = supportDir?.appendingPathComponent("bash", isDirectory: true) else { return nil }
+        let rc = dir.appendingPathComponent("mterm.bash")
+        guard ensureWritten(rc, shell: "bash", contents: { bashScript }) else { return nil }
+
+        // bash reads --rcfile only for an interactive *non-login* shell, so
+        // a login request — argv[0] "-bash", or -l/--login — is taken off
+        // the command line and handed to the wrapper, which sources the login
+        // files itself.
+        var out = argv
+        var login = false
+        if let first = out.first, first.hasPrefix("-"), first.count > 1, !first.hasPrefix("--") {
+            // "-bash": the login convention, not an option.
+            out[0] = String(first.dropFirst())
+            login = true
         }
-        unsetenv("MTERM_USER_ZDOTDIR")
+        out = out.enumerated().filter { i, a in
+            guard i > 0 else { return true }
+            if a == "-l" || a == "--login" { login = true; return false }
+            return true
+        }.map { $0.element }
+        out.insert(contentsOf: ["--rcfile", rc.path], at: 1)
+        var env = ["MTERM_BASH_LOGIN=" + (login ? "1" : "0")]
+        // Apple's bash 3.2 prints a "default shell is now zsh" notice on
+        // every start unless told not to; other terminals' users set this
+        // in a profile file that hasn't been read yet when bash prints it.
+        if ProcessInfo.processInfo.environment["BASH_SILENCE_DEPRECATION_WARNING"] == nil {
+            env.append("BASH_SILENCE_DEPRECATION_WARNING=1")
+        }
+        return Injection(argv: out, env: env)
     }
 
-    private static func writeWrapper(to dir: URL, zshrc: URL) -> Bool {
-        guard let history = historyDir else { return false }
+    // MARK: fish
+
+    private static func fish(argv: [String]) -> Injection? {
+        if argv.dropFirst().contains(where: { $0 == "--no-config" || $0 == "-N" || $0 == "-c" }) {
+            return nil
+        }
+        // XDG_DATA_DIRS entries are base directories; fish looks for
+        // <base>/fish/vendor_conf.d/*.fish in each.
+        guard let base = supportDir?.appendingPathComponent("fish", isDirectory: true) else { return nil }
+        let snippet = base.appendingPathComponent("fish/vendor_conf.d/mterm.fish")
+        guard ensureWritten(snippet, shell: "fish", contents: { fishScript }) else { return nil }
+        // Prepend rather than replace: when the variable is unset fish falls
+        // back to the XDG defaults, and setting it to just our directory
+        // would hide those.
+        let existing = ProcessInfo.processInfo.environment["XDG_DATA_DIRS"]
+        let rest = (existing?.isEmpty == false) ? existing! : "/usr/local/share:/usr/share"
+        return Injection(argv: argv, env: ["XDG_DATA_DIRS=" + base.path + ":" + rest])
+    }
+
+    // MARK: files
+
+    /// Writes `file` if it's missing, or unconditionally the first time this
+    /// launch asks for it. Returns false when it couldn't — the caller then
+    /// leaves the shell alone, because losing the hooks is a far smaller
+    /// regression than pointing a shell at a wrapper that isn't there.
+    private static func ensureWritten(_ file: URL, shell: String,
+                                      contents: () -> String) -> Bool {
+        let fm = FileManager.default
+        let force = !refreshedThisLaunch.contains(shell)
+        if !force && fm.fileExists(atPath: file.path) { return true }
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try script(historyDir: history.path).write(to: zshrc, atomically: true, encoding: .utf8)
+            try fm.createDirectory(at: file.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true)
+            try contents().write(to: file, atomically: true, encoding: .utf8)
+            refreshedThisLaunch.insert(shell)
             return true
         } catch {
             return false
         }
     }
 
-    /// Wraps `path` in single quotes for safe interpolation into the script —
+    /// Wraps `path` in single quotes for safe interpolation into a script —
     /// the default location contains a space ("Application Support").
     private static func shellQuote(_ path: String) -> String {
         "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    private static func script(historyDir: String) -> String {
+    // MARK: scripts
+
+    private static func zshScript(historyDir: String) -> String {
         let historyDirLiteral = shellQuote(historyDir)
         return #"""
     # mTerm shell integration wrapper.
@@ -249,4 +316,128 @@ enum ShellIntegration {
     preexec_functions=(__mterm_preexec ${(@)preexec_functions:#__mterm_preexec})
     """#
     }
+
+    /// Read by bash in place of ~/.bashrc. Written for bash 3.2, the one in
+    /// /bin: no arrays in PROMPT_COMMAND, no `${var,,}`, no associative
+    /// arrays.
+    private static let bashScript = #"""
+    # mTerm shell integration for bash. bash was started with `--rcfile` so
+    # this runs instead of ~/.bashrc; the startup files bash would otherwise
+    # have read are sourced here, in the order bash uses.
+    if [ "$MTERM_BASH_LOGIN" = 1 ]; then
+        # A login shell: the system profile, then the first personal one.
+        [ -r /etc/profile ] && . /etc/profile
+        for __mterm_f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+            if [ -r "$__mterm_f" ]; then
+                . "$__mterm_f"
+                break
+            fi
+        done
+        unset __mterm_f
+        # bash only runs ~/.bash_logout for shells it started as login shells.
+        if [ -r "$HOME/.bash_logout" ]; then
+            trap '. "$HOME/.bash_logout"' EXIT
+        fi
+    else
+        # An ordinary interactive shell reads ~/.bashrc and nothing else.
+        [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+    fi
+    unset MTERM_BASH_LOGIN
+
+    # OSC 7 (cwd reporting), percent-encoded byte by byte under LC_CTYPE=C
+    # so a path with a space or non-ASCII in it still produces a parseable URL.
+    __mterm_osc7() {
+        local url_path='' i ch hexch LC_ALL= LANG= LC_CTYPE=C LC_COLLATE=C
+        for ((i = 0; i < ${#PWD}; ++i)); do
+            ch="${PWD:$i:1}"
+            case "$ch" in
+                [/._~A-Za-z0-9-]) url_path="$url_path$ch" ;;
+                *) printf -v hexch "%02X" "'$ch"; url_path="$url_path%$hexch" ;;
+            esac
+        done
+        printf '\033]7;file://%s%s\007' "$HOSTNAME" "$url_path"
+    }
+
+    # OSC 133 (FinalTerm) semantic prompt markers:
+    #   before the prompt → D (exit code of the last command) + A
+    #   end of PS1        → B
+    #   DEBUG trap        → C, once, for the first command after a prompt
+    #
+    # The DEBUG trap fires before every simple command — including each part
+    # of PROMPT_COMMAND — so it only reports while __mterm_at_prompt is set,
+    # and that is raised by the *last* thing in PROMPT_COMMAND and lowered by
+    # the first command that runs afterwards: the user's.
+    __mterm_at_prompt=0
+    __mterm_first=1
+    __mterm_precmd() {
+        local exit=$?
+        if [ "$__mterm_first" = 1 ]; then
+            __mterm_first=0
+        else
+            printf '\033]133;D;%d\007' "$exit"
+        fi
+        printf '\033]133;A\007'
+        __mterm_osc7
+        # A prompt framework that rebuilds PS1 from PROMPT_COMMAND would
+        # drop the end-of-prompt mark, so it's re-attached here each time.
+        case "$PS1" in
+            *'133;B'*) ;;
+            *) PS1="$PS1"'\[\e]133;B\a\]' ;;
+        esac
+        # Keep the exit status for anything that runs after us in
+        # PROMPT_COMMAND and reads $?.
+        return $exit
+    }
+    __mterm_prompt_ready() {
+        __mterm_at_prompt=1
+    }
+    __mterm_preexec() {
+        [ "$__mterm_at_prompt" = 1 ] || return 0
+        [ -n "$COMP_LINE" ] && return 0            # tab completion, not a command
+        __mterm_at_prompt=0
+        printf '\033]133;C\007'
+    }
+    PROMPT_COMMAND="__mterm_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}; __mterm_prompt_ready"
+    trap '__mterm_preexec' DEBUG
+    """#
+
+    /// Sourced by fish from vendor_conf.d before the user's config.fish.
+    private static let fishScript = #"""
+    # mTerm shell integration for fish.
+    status is-interactive; or exit
+    # fish 4 emits OSC 133 prompt markers and OSC 7 itself; only 3.x needs
+    # this. MTERM_FISH_FORCE exists so the snippet can be exercised under a
+    # newer fish.
+    if test (string split . -- $version)[1] -ge 4; and not set -q MTERM_FISH_FORCE
+        exit
+    end
+
+    function __mterm_osc7 --on-variable PWD
+        printf '\e]7;file://%s%s\a' (hostname) (string escape --style=url -- $PWD | string replace -a %2F /)
+    end
+
+    function __mterm_mark_prompt --on-event fish_prompt
+        printf '\e]133;A\a'
+        __mterm_osc7
+        # The end-of-prompt mark has to follow the prompt text, and fish has
+        # no event for that, so fish_prompt is wrapped the first time it is
+        # about to run — and again if something redefines it later.
+        functions -q fish_prompt; or function fish_prompt; echo '> '; end
+        if not string match -q '*__mterm_user_prompt*' -- (functions fish_prompt | string join ' ')
+            functions -c fish_prompt __mterm_user_prompt
+            function fish_prompt
+                __mterm_user_prompt
+                printf '\e]133;B\a'
+            end
+        end
+    end
+
+    function __mterm_mark_output --on-event fish_preexec
+        printf '\e]133;C\a'
+    end
+
+    function __mterm_mark_done --on-event fish_postexec
+        printf '\e]133;D;%d\a' $status
+    end
+    """#
 }

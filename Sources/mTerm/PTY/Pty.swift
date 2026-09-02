@@ -38,29 +38,46 @@ final class Pty {
             src.cancel()
         }
         close(masterFd)
-        kill(pid, SIGHUP)
+        if reaped == nil { kill(pid, SIGHUP) }
     }
 
-    static func spawnShell(cols: Int, rows: Int, cwd: String? = nil) -> Pty? {
-        // Re-assert the ZDOTDIR wrapper. It's written once at launch, but the
-        // app can outlive it, and a wrapper that goes missing takes the user's
-        // entire zsh config down with it (see ShellIntegration).
-        ShellIntegration.ensureInstalled()
-
-        setenv("TERM", "xterm-256color", 1)
-        setenv("LANG", "en_US.UTF-8", 1)
-        setenv("COLORTERM", "truecolor", 1)
-
-        let shellPath = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    /// Starts `spec` on a fresh PTY. Shell integration is applied here, per
+    /// spawn, so a profile running bash gets bash's hooks while the zsh tab
+    /// next to it keeps its own — nothing about either leaks into the app's
+    /// environment or into the other tab.
+    static func spawn(_ spec: LaunchSpec, cols: Int, rows: Int) -> Pty? {
+        var argv = spec.argv
+        var env = [
+            "TERM=xterm-256color",
+            "COLORTERM=truecolor",
+            "TERM_PROGRAM=mTerm",
+            "TERM_PROGRAM_VERSION=" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                                       as? String ?? "dev"),
+        ]
+        if ProcessInfo.processInfo.environment["LANG"] == nil {
+            env.append("LANG=en_US.UTF-8")
+        }
+        if let injection = ShellIntegration.injection(path: spec.path, argv: argv) {
+            argv = injection.argv
+            env += injection.env
+        }
+        // The profile's own variables last, so they win over ours.
+        env += spec.env
 
         var pid: pid_t = 0
-        let master: Int32 = shellPath.withCString { shellCStr in
-            if let cwd = cwd, !cwd.isEmpty {
-                return cwd.withCString { cwdCStr in
-                    mterm_spawn_shell(shellCStr, cwdCStr, UInt16(rows), UInt16(cols), &pid)
+        let master = withCStringArray(argv) { argvPtr in
+            withCStringArray(env) { envPtr in
+                spec.path.withCString { pathCStr in
+                    if let cwd = spec.cwd, !cwd.isEmpty {
+                        return cwd.withCString { cwdCStr in
+                            mterm_spawn(pathCStr, argvPtr, cwdCStr, envPtr,
+                                        UInt16(rows), UInt16(cols), &pid)
+                        }
+                    }
+                    return mterm_spawn(pathCStr, argvPtr, nil, envPtr,
+                                       UInt16(rows), UInt16(cols), &pid)
                 }
             }
-            return mterm_spawn_shell(shellCStr, nil, UInt16(rows), UInt16(cols), &pid)
         }
         if master < 0 { return nil }
 
@@ -69,6 +86,35 @@ final class Pty {
 
         return Pty(masterFd: master, pid: pid)
     }
+
+    /// A NULL-terminated `char *[]` for the duration of `body`.
+    private static func withCStringArray<R>(_ strings: [String],
+                                            _ body: (UnsafePointer<UnsafeMutablePointer<CChar>?>) -> R) -> R {
+        var pointers: [UnsafeMutablePointer<CChar>?] = strings.map { strdup($0) }
+        pointers.append(nil)
+        defer { for p in pointers { free(p) } }
+        return pointers.withUnsafeBufferPointer { buf in
+            body(buf.baseAddress!)
+        }
+    }
+
+    /// The child's exit status once it has gone, reaped here because nothing
+    /// else waits on it. nil while it is still running. Main-thread only.
+    func exitStatus() -> Int32? {
+        if let reaped { return reaped }
+        var status: Int32 = 0
+        let r = waitpid(pid, &status, WNOHANG)
+        guard r == pid else { return nil }
+        let code: Int32
+        if (status & 0x7f) == 0 {
+            code = (status >> 8) & 0xff              // WEXITSTATUS
+        } else {
+            code = 128 + (status & 0x7f)             // killed by a signal
+        }
+        reaped = code
+        return code
+    }
+    private var reaped: Int32?
 
     func write(_ bytes: [UInt8]) {
         guard !bytes.isEmpty else { return }

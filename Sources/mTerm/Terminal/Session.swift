@@ -47,8 +47,11 @@ final class Session {
     /// `title` is empty when the escape carried only a body (OSC 9).
     var onNotify: ((_ title: String, _ body: String) -> Void)?
 
-    init?(cols: Int, rows: Int, cwd: String? = nil) {
-        guard let pty = Pty.spawnShell(cols: cols, rows: rows, cwd: cwd) else { return nil }
+    /// `cwd` overrides the profile's own directory — session restore hands
+    /// back the tab's last one. Main-thread only, for `ProfileStore`.
+    init?(cols: Int, rows: Int, cwd: String? = nil, profile: Profile? = nil) {
+        let spec = (profile ?? ProfileStore.shared.defaultProfile).launchSpec(cwd: cwd)
+        guard let pty = Pty.spawn(spec, cols: cols, rows: rows) else { return nil }
         self.pty = pty
         self.state = TerminalState(cols: cols, rows: rows)
         self.parser.sink = state

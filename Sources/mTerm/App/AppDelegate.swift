@@ -11,8 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = AppIcon.make()
 
-        // Must run before any tab is spawned so child shells inherit ZDOTDIR.
-        ShellIntegration.install()
+        // Shell integration is no longer installed process-wide: `Pty.spawn`
+        // applies it per child, so a bash profile gets bash's hooks while the
+        // zsh tab beside it keeps its own and the app's own environment stays
+        // untouched.
 
         // Force ThemeStore to spin up on the main thread before any session.
         _ = ThemeStore.shared

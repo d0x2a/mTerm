@@ -7,15 +7,22 @@
 extern "C" {
 #endif
 
-// Forks a child via forkpty(3), optionally chdirs to `cwd` in the child, then
-// execs the given shell as a login shell (argv[0] = "-basename"). Returns the
-// master fd; the child PID is written to *out_pid on success. Returns -1 on
-// failure (with errno set). Pass NULL for `cwd` to keep the parent's CWD.
-int mterm_spawn_shell(const char *shell_path,
-                      const char *cwd,
-                      unsigned short rows,
-                      unsigned short cols,
-                      pid_t *out_pid);
+// Forks a child via forkpty(3), applies `env` and `cwd` in the child, then
+// execs `path` with `argv`. argv[0] is whatever the child should see as its
+// name — a login shell is spawned by passing "-zsh" there, the convention
+// login(1), Terminal.app and ssh use, with the real path in `path`. `env` is a
+// NULL-terminated list of "KEY=VALUE" strings to set and bare "KEY" strings
+// to unset, applied to the child only. Returns the master fd; the child PID
+// is written to *out_pid on success. Returns -1 on failure (with errno set).
+// Pass NULL for `cwd` to keep the parent's CWD and NULL for `env` to inherit
+// the parent's environment unchanged.
+int mterm_spawn(const char *path,
+                char *const argv[],
+                const char *cwd,
+                char *const env[],
+                unsigned short rows,
+                unsigned short cols,
+                pid_t *out_pid);
 
 // Updates the PTY's window size via TIOCSWINSZ. Returns 0 on success.
 int mterm_set_winsize(int fd, unsigned short rows, unsigned short cols);

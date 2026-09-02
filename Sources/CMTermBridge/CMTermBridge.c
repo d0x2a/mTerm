@@ -9,25 +9,18 @@
 #include <libproc.h>
 #include <sys/sysctl.h>
 
-int mterm_spawn_shell(const char *shell_path,
-                      const char *cwd,
-                      unsigned short rows,
-                      unsigned short cols,
-                      pid_t *out_pid) {
+int mterm_spawn(const char *path,
+                char *const argv[],
+                const char *cwd,
+                char *const env[],
+                unsigned short rows,
+                unsigned short cols,
+                pid_t *out_pid) {
     struct winsize ws;
     ws.ws_row = rows;
     ws.ws_col = cols;
     ws.ws_xpixel = 0;
     ws.ws_ypixel = 0;
-
-    // Build argv[0] as "-basename" to mark this as a login shell, matching the
-    // convention used by login(1), Terminal.app, and ssh. zsh/bash/fish detect
-    // the leading dash and source login profile files (.zshrc via oh-my-zsh,
-    // .bash_profile, etc.).
-    const char *base = strrchr(shell_path, '/');
-    base = base ? base + 1 : shell_path;
-    char argv0[256];
-    snprintf(argv0, sizeof(argv0), "-%s", base);
 
     int master = -1;
     pid_t pid = forkpty(&master, NULL, NULL, &ws);
@@ -35,13 +28,31 @@ int mterm_spawn_shell(const char *shell_path,
         return -1;
     }
     if (pid == 0) {
+        // Environment edits happen here, in the child, so a profile's
+        // variables and a shell's integration hooks reach that one process
+        // and nothing else in the app. "KEY=VALUE" sets, a bare "KEY" unsets.
+        if (env) {
+            for (char *const *e = env; *e; e++) {
+                const char *eq = strchr(*e, '=');
+                if (eq) {
+                    size_t klen = (size_t)(eq - *e);
+                    char *key = malloc(klen + 1);
+                    if (!key) continue;
+                    memcpy(key, *e, klen);
+                    key[klen] = '\0';
+                    setenv(key, eq + 1, 1);
+                    free(key);
+                } else {
+                    unsetenv(*e);
+                }
+            }
+        }
         if (cwd && *cwd) {
-            // Best effort — if it fails we still exec the shell from whatever
-            // CWD we got, rather than refusing to spawn.
+            // Best effort — if it fails we still exec from whatever CWD we
+            // got, rather than refusing to spawn.
             (void)chdir(cwd);
         }
-        char *argv[] = { argv0, NULL };
-        execvp(shell_path, argv);
+        execvp(path, argv);
         _exit(127);
     }
     if (out_pid) {
