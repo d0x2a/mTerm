@@ -35,7 +35,15 @@ final class Session {
     /// instead of stalling, and the burst's own signal brings it up to date.
     private struct Published {
         let snapshot: TerminalSnapshot
-        let synchronizedUpdateActive: Bool
+        /// The deadline rather than a sampled Bool, so the gate can close on
+        /// a tick this queue never woke for. See
+        /// `TerminalState.synchronizedUpdateDeadline`.
+        let synchronizedUpdateDeadline: CFAbsoluteTime?
+
+        var synchronizedUpdateActive: Bool {
+            guard let deadline = synchronizedUpdateDeadline else { return false }
+            return CFAbsoluteTimeGetCurrent() < deadline
+        }
     }
     private let publishedLock = NSLock()
     private var published: Published?
@@ -79,7 +87,7 @@ final class Session {
     /// Must run on `queue`.
     private func publish() {
         let value = Published(snapshot: state.viewportSnapshot(scrollOffset: 0),
-                              synchronizedUpdateActive: state.synchronizedUpdateActive)
+                              synchronizedUpdateDeadline: state.synchronizedUpdateDeadline)
         publishedLock.lock()
         published = value
         publishedLock.unlock()

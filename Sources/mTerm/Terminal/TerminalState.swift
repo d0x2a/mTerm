@@ -258,9 +258,28 @@ final class TerminalState: ParserSink {
     private static let eraseHoldTimeout: CFAbsoluteTime = 0.08
 
     private func holdForRepaintAfterErase() {
-        guard syncUpdateDeadline == nil else { return }
+        // Against the live flag rather than `syncUpdateDeadline != nil`: a
+        // deadline that has already passed is not an open update, and leaving
+        // it in place would wedge every later erase behind a hold that can no
+        // longer be re-armed.
+        guard !synchronizedUpdateActive else { return }
         syncUpdateDeadline = CFAbsoluteTimeGetCurrent() + Self.eraseHoldTimeout
     }
+
+    /// When the current hold runs out, or nil when no update is open.
+    ///
+    /// This is what gets published alongside the grid, rather than a sampled
+    /// Bool. The flag is only ever read on the session queue, and that queue
+    /// runs when the child writes — so a hold armed by the last bytes of a
+    /// burst froze at `true` for as long as the child then stayed quiet. That
+    /// is exactly the shape of `clear` at an idle prompt: the erase arms the
+    /// hold, the shell writes its new prompt and goes silent, and with no
+    /// further output to republish the flag, every tick kept holding the
+    /// *pre-erase* frame. The screen kept the old lines, and the cursor
+    /// stopped blinking, until the next keystroke produced output. Handing the
+    /// view the deadline instead lets it re-check against the clock on a tick
+    /// that no new output drives.
+    var synchronizedUpdateDeadline: CFAbsoluteTime? { syncUpdateDeadline }
 
     /// True while the child holds a synchronized update open (DEC 2026), until
     /// the safety deadline passes.
@@ -1803,6 +1822,11 @@ final class TerminalState: ParserSink {
             }
             blankCells(from: rowBase(cursorRow), count: min(cursorCol, cols - 1) + 1)
         case 2:
+            // What was on screen goes to history rather than being dropped.
+            // This is the ED that Ctrl+L is built from, and dropping it left a
+            // hole: scrolling up jumped straight past the screenful that had
+            // just been cleared. Terminal.app, iTerm2 and kitty all keep it.
+            pushScreenToScrollback()
             // Every row is cleared, so ring order doesn't matter here.
             blankCells(from: 0, count: cells.count)
             for i in rowWrapped.indices { rowWrapped[i] = false }
@@ -1817,6 +1841,45 @@ final class TerminalState: ParserSink {
         default:
             break
         }
+    }
+
+    /// Moves the visible grid into scrollback ahead of a full-screen erase, so
+    /// what was on screen stays reachable by scrolling.
+    ///
+    /// Order is what keeps this compatible with the apps that erase to repaint.
+    /// codex's resize emits `H 2J 3J H` — the push lands in history and the
+    /// `3J` right behind it takes the whole lot away again, so no stale copy
+    /// survives a drag. `clear(1)` emits the reverse, `3J H 2J`: history goes
+    /// first and the screenful the user was looking at is what remains. Ctrl+L
+    /// sends the `2J` alone and keeps everything.
+    ///
+    /// Trailing blank rows are left behind — an app that erases an already
+    /// erased screen would otherwise file a screenful of nothing on every
+    /// repaint — and the alt screen never feeds history at all.
+    private func pushScreenToScrollback() {
+        guard !usingAlt else { return }
+        // Built once: `Cell` reaches for the theme (under a lock) whenever a
+        // colour is left out, and this is on the repaint path.
+        let blank = Cell(bg: currentBg)
+        var last = -1
+        for r in 0..<rows where !rowIsBlank(r, blank: blank) { last = r }
+        guard last >= 0 else { return }
+        pushToScrollback(last + 1)
+    }
+
+    /// True when every cell in `row` is what an erase to the current
+    /// background would have left. Colour counts: a band with no text in it is
+    /// still something the user saw, which is why this compares the same
+    /// fields `paintedCount` does rather than looking only for glyphs.
+    private func rowIsBlank(_ row: Int, blank: Cell) -> Bool {
+        let base = rowBase(row)
+        for c in 0..<cols {
+            let cell = cells[base + c]
+            guard cell.scalar == blank.scalar, cell.width == blank.width,
+                  cell.attrs == blank.attrs, cell.fg == blank.fg, cell.bg == blank.bg
+            else { return false }
+        }
+        return true
     }
 
     /// Drops every saved row. `scrolledRows` keeps counting so absolute line
