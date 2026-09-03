@@ -250,7 +250,7 @@ so nothing is blocked from being ticked by a part of it that hasn't shipped.
 - [x] Profiles: Settings editor, New Tab menu, theme override
 - [x] Themes + macOS appearance switching
 - [x] Settings window (Appearance / Profiles / Triggers / General / Notifications)
-- [ ] Settings search
+- [x] Settings search
 - [x] Session restore (tabs, their directories and their profiles)
 - [x] Signed + notarized DMG
 - [x] README + screenshots

@@ -59,14 +59,13 @@ swift run -c release mTerm
 - Close-confirmation when a foreground process is running (`vim`, `ssh`, etc.) — togglable in Settings.
 - Font family, size, stroke weight, and line spacing (1.0×–2.0×, default 1.15×) are all adjustable live in Settings.
 - Triggers: a regex plus what to do with what it matches — highlight it, recolour it, underline it, or make ⌘-click open it as a URL, reveal it in Finder, or run a command with `$1` as the match. Edited in Settings with an inline tester that runs the real regex, and stored in `triggers.json`. Your rules are tried before the two built-in ones (URLs and file paths), which can be switched off but not edited — their patterns are maintained in mTerm and improve between releases.
-- Scrollback depth is configurable in Settings (1k–100k lines, 10k default).
 - Profiles: a named command, starting directory, environment and optional pinned theme, edited in Settings and stored one JSON file each under `profiles/` so a profile can be shared or checked into a repo. Open one from `File > New Tab with Profile` or ⌘⌥1–9; ⌘T uses whichever is marked default. A profile that pins a theme keeps it whatever the system appearance does, so a production-ssh tab can look different from the rest.
-- Settings window organized into Appearance / Profiles / Triggers / General / Notifications panes.
+- Settings window organized into Appearance / Profiles / Triggers / General / Notifications panes, with a search field over the sidebar that finds a control by what it's called or by what you'd call it — "antialiasing" finds stroke weight, "history" finds the scrollback depth — and takes you to it with the focus ring on it.
+- Shell integration can be switched off in Settings, and the scrollback depth picked there too (1k–100k lines; the pane shows what each costs per tab).
 
 ## Not yet (tracked for v1)
 
 - tmux `-CC` control mode.
-- Settings search.
 
 ## Keyboard shortcuts
 
