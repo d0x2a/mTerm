@@ -4,7 +4,7 @@ import SwiftUI
 /// the selected pane on the right.
 struct SettingsView: View {
     private enum Category: String, CaseIterable, Identifiable {
-        case appearance, profiles, general, notifications
+        case appearance, profiles, triggers, general, notifications
 
         var id: String { rawValue }
 
@@ -12,6 +12,7 @@ struct SettingsView: View {
             switch self {
             case .appearance:    return "Appearance"
             case .profiles:      return "Profiles"
+            case .triggers:      return "Triggers"
             case .general:       return "General"
             case .notifications: return "Notifications"
             }
@@ -21,6 +22,7 @@ struct SettingsView: View {
             switch self {
             case .appearance:    return "paintbrush"
             case .profiles:      return "person.crop.rectangle.stack"
+            case .triggers:      return "bolt.horizontal"
             case .general:       return "gearshape"
             case .notifications: return "bell"
             }
@@ -90,6 +92,8 @@ struct SettingsView: View {
             fields = AppearancePane.fieldOrder
         case .profiles:
             fields = ProfilesPane.fieldOrder
+        case .triggers:
+            fields = TriggersPane.fieldOrder
         case .general:
             fields = GeneralPane.fieldOrder
         case .notifications:
@@ -104,6 +108,7 @@ struct SettingsView: View {
         switch category {
         case .appearance:    AppearancePane(focus: $focus)
         case .profiles:      ProfilesPane(focus: $focus)
+        case .triggers:      TriggersPane(focus: $focus)
         case .general:       GeneralPane(focus: $focus)
         case .notifications: NotificationsPane(focus: $focus)
         }

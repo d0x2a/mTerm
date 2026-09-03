@@ -10,7 +10,19 @@ enum ClickAction: Codable, Equatable {
     case runCommand(String)        // template, $1 is the matched text
 }
 
-enum TriggerStyle: String, Codable {
+enum TriggerStyle: String, Codable, CaseIterable, Identifiable {
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none:       return "None"
+        case .background: return "Background"
+        case .underline:  return "Underline"
+        case .both:       return "Background + underline"
+        case .text:       return "Text colour"
+        }
+    }
+
     /// Clickable, but never drawn as part of the ambient screen. What the
     /// builtins use: marking *every* link at once — a rule under each, a tint
     /// behind each, each in its own colour — was tried in all three forms and
@@ -131,6 +143,12 @@ extension Trigger {
                                    style: .none,
                                    clickAction: .openURL)
 
+    /// Fixed rather than freshly generated, because `TriggerStore` persists
+    /// *which builtins are switched off* by id. A new uuid each launch would
+    /// forget that on every relaunch.
+    static let urlID  = UUID(uuidString: "6D546572-6D00-4000-8000-000000000001")!
+    static let pathID = UUID(uuidString: "6D546572-6D00-4000-8000-000000000002")!
+
     /// Defaults shipped with mTerm. Neither draws anything of its own: a link
     /// looks exactly like the text around it until the pointer reaches it,
     /// and only then takes the theme accent with a matching underline. What
@@ -142,15 +160,28 @@ extension Trigger {
     /// visible style without inventing one. Git SHAs and IPv4 used to be
     /// builtins too; they marked constantly and had nothing useful to open.
     static let builtins: [Trigger] = [
-        Trigger(name: "URL",
+        Trigger(id: urlID,
+                name: "URL",
                 pattern: urlPattern,
                 color: SIMD4(0.40, 0.65, 1.00, 1.00),
                 style: .none,
                 clickAction: .openURL),
-        Trigger(name: "File path",
+        Trigger(id: pathID,
+                name: "File path",
                 pattern: pathPattern,
                 color: SIMD4(0.40, 0.65, 1.00, 1.00),
                 style: .none,
                 clickAction: .revealFile),
     ]
+
+    /// Builtins are shown in Settings and can be switched off, but not edited
+    /// or deleted. Their patterns are maintained here and improve between
+    /// releases — the URL rule's TLD list, the path rule's segment shapes —
+    /// and the path rule in particular is only quiet because TerminalView
+    /// drops matches that don't exist on disk. Copying them into a
+    /// user-editable file would freeze them at whatever version seeded it and
+    /// invite edits that break a coupling living in another file.
+    var isBuiltin: Bool { Trigger.builtinIDs.contains(id) }
+
+    static let builtinIDs: Set<UUID> = [urlID, pathID]
 }

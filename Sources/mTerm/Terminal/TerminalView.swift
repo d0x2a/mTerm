@@ -139,7 +139,10 @@ final class TerminalView: NSView, CALayerDelegate {
     private var search: SearchState?
     private var searchBar: SearchBar?
 
-    private let triggerEvaluator = TriggerEvaluator()
+    private let triggerEvaluator = TriggerEvaluator(triggers: TriggerStore.shared.active)
+    /// `TriggerStore.generation` as of the last `reconcileTriggersIfChanged`.
+    /// An integer compare per tick, rather than diffing a list of regexes.
+    private var lastTriggerGeneration = TriggerStore.shared.generation
     private var currentTriggerMatches: [TriggerMatch] = []
     private var commandHeld: Bool = false
     private var pathExistsCache: [String: Bool] = [:]
@@ -219,6 +222,21 @@ final class TerminalView: NSView, CALayerDelegate {
         invalidate()
         lastAppliedTheme = new
         session?.applyThemeChange(from: old, to: new)
+    }
+
+    /// Called every tick. Picks up trigger edits made in Settings.
+    ///
+    /// The memo has to be dropped with them: it is keyed on what the *screen*
+    /// looks like, so an unchanged screen under a changed rule set would keep
+    /// handing back the old matches.
+    private func reconcileTriggersIfChanged() {
+        let generation = TriggerStore.shared.generation
+        guard generation != lastTriggerGeneration else { return }
+        lastTriggerGeneration = generation
+        triggerEvaluator.triggers = TriggerStore.shared.active
+        memoedFingerprint = nil
+        memoedTriggerMatches = []
+        invalidate()
     }
 
     /// Called every tick. Rebuilds the Metal renderer (and its glyph atlas) when
@@ -1267,6 +1285,7 @@ final class TerminalView: NSView, CALayerDelegate {
         reportFocusIfChanged()
         reconcileThemeIfChanged()
         reconcileFontIfChanged()
+        reconcileTriggersIfChanged()
         // Idle ticks used to rebuild and present the whole grid 120 times a
         // second whether or not a pixel had changed. The blink phase is part of
         // the check because it's the one thing that legitimately changes on a

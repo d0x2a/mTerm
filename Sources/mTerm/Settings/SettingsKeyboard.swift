@@ -13,6 +13,10 @@ enum SettingsField: Hashable {
     case profileList, profileAdd, profileRemove, profileMoveUp, profileMoveDown
     case profileName, profileCommand, profileDirectory, profileChooseDirectory
     case profileTheme, profileDefault, profileEnvAdd
+    // Triggers
+    case triggerList, triggerAdd, triggerRemove, triggerMoveUp, triggerMoveDown
+    case triggerEnabled, triggerName, triggerPattern, triggerSample
+    case triggerStyle, triggerColor, triggerAction, triggerCommand
     // General
     case warnOnClose
     // Notifications
