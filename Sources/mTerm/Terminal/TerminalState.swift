@@ -154,6 +154,17 @@ final class TerminalState: ParserSink {
     /// may be painting in different palettes at the same time. Kept in step
     /// with the tab's effective theme by `applyThemeChange`, which also
     /// remaps every cell already on screen.
+    /// Whether a resize reflows this buffer's lines.
+    ///
+    /// False for a tmux pane. tmux owns the pane: `refresh-client -C` resizes
+    /// it, the program in it sees SIGWINCH and repaints, and the repaint
+    /// arrives as `%output` a moment later. Reflowing our copy in the meantime
+    /// re-wraps lines a full-screen program never meant to be re-wrapped —
+    /// mid-word, mid-frame, for every step of a window drag — and then throws
+    /// the result away when the repaint lands. Same reasoning the alt screen
+    /// is not reflowed on.
+    let reflowsOnResize: Bool
+
     private(set) var theme: Theme
     /// `theme`'s fg/bg, packed once. A blank cell is made often enough — every
     /// erase, every scrolled-in row — that repacking two colours each time
@@ -363,7 +374,9 @@ final class TerminalState: ParserSink {
     /// live one.
     init(cols: Int, rows: Int,
          scrollback: Int = ThemeStore.shared.settings.scrollbackLines,
-         theme: Theme = ThemeStore.currentTheme) {
+         theme: Theme = ThemeStore.currentTheme,
+         reflowsOnResize: Bool = true) {
+        self.reflowsOnResize = reflowsOnResize
         self.cols = max(1, cols)
         self.rows = max(1, rows)
         self.maxScrollback = max(0, scrollback)
@@ -391,7 +404,16 @@ final class TerminalState: ParserSink {
         // Reflow reads the buffer in logical row order.
         normalizeRowOffset()
 
-        if usingAlt {
+        if !reflowsOnResize {
+            // A tmux pane, which repaints itself. Clip or pad, and let the
+            // repaint fill it in.
+            cells = Self.resizedGrid(cells, oldCols: cols, oldRows: rows,
+                                     newCols: newCols, newRows: newRows,
+                                     blank: blankCell)
+            rowWrapped = Array(repeating: false, count: newRows)
+            cursorCol = min(cursorCol, newCols - 1)
+            cursorRow = min(cursorRow, newRows - 1)
+        } else if usingAlt {
             // The alt screen is not reflowed: full-screen apps repaint from
             // scratch when they see SIGWINCH, and xterm discards its alt
             // content the same way. The primary buffer stashed behind it does

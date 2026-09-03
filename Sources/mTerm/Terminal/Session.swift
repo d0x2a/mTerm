@@ -135,7 +135,11 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
          theme: Theme = ThemeStore.currentTheme) {
         self.pty = nil
         self.transport = transport
-        self.state = TerminalState(cols: cols, rows: rows, theme: theme)
+        // No reflow: tmux resizes the pane and the program repaints it, so
+        // re-wrapping our copy in between only mangles the frames shown during
+        // a window drag.
+        self.state = TerminalState(cols: cols, rows: rows, theme: theme,
+                                   reflowsOnResize: false)
         self.parser.sink = state
         state.onBell = { [weak self] in
             DispatchQueue.main.async { self?.onBell?() }

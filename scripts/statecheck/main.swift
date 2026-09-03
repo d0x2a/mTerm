@@ -150,6 +150,39 @@ do {
           t.snapshot().cells[0].bg == PackedColor(app.background))
 }
 
+section("a pane that repaints itself is not reflowed")
+do {
+    // tmux resizes the pane, the program repaints, and the repaint arrives a
+    // moment later. Re-wrapping our copy in between mangles every frame of a
+    // window drag — mid-word, as the recording of 2026-09-03 showed.
+    let state = TerminalState(cols: 20, rows: 4, scrollback: 50,
+                              reflowsOnResize: false)
+    let parser = Parser()
+    parser.sink = state
+    // 30 characters into a 20-column pane, so it genuinely wraps.
+    let text = "hello world and more text here"
+    Array(text.utf8).withUnsafeBufferPointer { parser.feed(bytes: $0) }
+    check("it wrapped on the way in",
+          row(state.snapshot(), 0) == "hello world and more"
+          && row(state.snapshot(), 1) == " text here",
+          "rows: \(row(state.snapshot(), 0).debugDescription), \(row(state.snapshot(), 1).debugDescription)")
+
+    state.resize(cols: 40, rows: 4)
+    check("widening leaves the halves where the program put them",
+          row(state.snapshot(), 0) == "hello world and more"
+          && row(state.snapshot(), 1) == " text here",
+          "rows: \(row(state.snapshot(), 0).debugDescription), \(row(state.snapshot(), 1).debugDescription)")
+
+    // An ordinary buffer must still reflow: that is what a shell wants, and
+    // what mTerm has always done.
+    let (shell, feed) = buffer(cols: 20, rows: 4)
+    feed(text)
+    shell.resize(cols: 40, rows: 4)
+    check("an ordinary buffer still rejoins them",
+          row(shell.snapshot(), 0) == text,
+          "row 0 is \(row(shell.snapshot(), 0).debugDescription)")
+}
+
 section("reflow on resize")
 do {
     let (s, feed) = buffer(cols: 8, rows: 4)
