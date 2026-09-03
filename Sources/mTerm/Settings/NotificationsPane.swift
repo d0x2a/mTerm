@@ -4,15 +4,6 @@ struct NotificationsPane: View {
     @ObservedObject private var store = ThemeStore.shared
     @FocusState.Binding var focus: SettingsField?
 
-    /// The two dependent toggles are disabled when notifications are off, so
-    /// they drop out of the Tab order too rather than being focus stops that
-    /// do nothing.
-    static func fieldOrder(notificationsEnabled: Bool) -> [SettingsField] {
-        notificationsEnabled
-            ? [.notificationsEnabled, .notifyOnBell, .notifyOnlyWhenUnfocused]
-            : [.notificationsEnabled]
-    }
-
     init(focus: FocusState<SettingsField?>.Binding) {
         self._focus = focus
     }

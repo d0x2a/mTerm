@@ -24,12 +24,6 @@ struct ProfilesPane: View {
     /// and identity; `commitEnvironment` folds them back into the dictionary.
     @State private var envRows: [EnvRow] = []
 
-    static let fieldOrder: [SettingsField] = [
-        .profileList, .profileAdd, .profileRemove, .profileMoveUp, .profileMoveDown,
-        .profileName, .profileCommand, .profileDirectory, .profileChooseDirectory,
-        .profileTheme, .profileDefault, .profileEnvAdd,
-    ]
-
     init(focus: FocusState<SettingsField?>.Binding) {
         self._focus = focus
     }

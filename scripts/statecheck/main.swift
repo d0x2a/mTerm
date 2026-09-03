@@ -253,6 +253,58 @@ do {
           "\(login.argv)")
 }
 
+section("settings search")
+do {
+    // The index is also the Tab order, so a gap here is a control nobody can
+    // reach with the keyboard, not just one search can't find.
+    check("every pane has indexed controls",
+          SettingsCategory.allCases.allSatisfy { !SettingsIndex.fields(in: $0).isEmpty })
+    let fields = SettingsIndex.all.map(\.field)
+    check("no control is indexed twice", Set(fields).count == fields.count)
+    check("fields(in:) keeps the index's order",
+          SettingsIndex.fields(in: .general).first == .warnOnClose)
+    check("and covers only its own pane",
+          SettingsIndex.fields(in: .notifications).allSatisfy {
+              [.notificationsEnabled, .notifyOnBell, .notifyOnlyWhenUnfocused].contains($0)
+          })
+
+    check("an empty query matches nothing", SettingsIndex.search("").isEmpty)
+    check("whitespace is not a query", SettingsIndex.search("   ").isEmpty)
+    check("nonsense matches nothing", SettingsIndex.search("zzzzq").isEmpty)
+
+    // Ranking is the point: a label match has to beat a pane-name match, or
+    // "font" leads with whatever happens to sit in a matching pane.
+    let font = SettingsIndex.search("font")
+    check("\"font\" leads with the font controls",
+          font.first?.field == .fontFamily && font.dropFirst().first?.field == .fontSize,
+          "got \(font.prefix(2).map(\.label))")
+
+    check("search is case-insensitive",
+          SettingsIndex.search("FONT").map(\.field) == font.map(\.field))
+
+    // Keyword-only hits: the word someone arrives with is rarely the label.
+    check("\"antialiasing\" finds stroke weight",
+          SettingsIndex.search("antialiasing").first?.field == .strokeWeight)
+    check("\"history\" finds the scrollback depth",
+          SettingsIndex.search("history").first?.field == .scrollbackLines)
+    check("\"osc\" finds shell integration",
+          SettingsIndex.search("osc").first?.field == .shellIntegration)
+    check("\"regex\" finds the trigger pattern",
+          SettingsIndex.search("regex").contains { $0.field == .triggerPattern })
+
+    // A word inside a long label should rank as well as its first word does.
+    check("\"closing\" finds the close warning",
+          SettingsIndex.search("closing").first?.field == .warnOnClose)
+    check("\"bell\" finds the bell toggle",
+          SettingsIndex.search("bell").first?.field == .notifyOnBell)
+
+    // The two settings that had no UI at all until now.
+    check("the scrollback depth is reachable",
+          SettingsIndex.fields(in: .general).contains(.scrollbackLines))
+    check("so is shell integration",
+          SettingsIndex.fields(in: .general).contains(.shellIntegration))
+}
+
 section("saved state")
 do {
     let saved = SavedState(tabs: [SavedTab(cwd: "/tmp", profileId: "ABC"), SavedTab(cwd: nil)],

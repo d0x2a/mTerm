@@ -17,13 +17,6 @@ struct AppearancePane: View {
     @FocusState.Binding var focus: SettingsField?
     @State private var fontPicker = FontPickerHandle()
 
-    /// Tab order for this pane, top to bottom as the controls are laid out.
-    /// Read by `SettingsView`, which owns the focus state and the Tab handler.
-    static let fieldOrder: [SettingsField] = [
-        .mode, .lightTheme, .darkTheme, .importTheme,
-        .fontFamily, .fontSize, .strokeWeight, .lineHeight, .blinkCursor
-    ]
-
     init(focus: FocusState<SettingsField?>.Binding) {
         self._focus = focus
     }

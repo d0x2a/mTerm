@@ -21,6 +21,8 @@ swiftc -framework SwiftUI -o "$out" \
     Sources/mTerm/App/AppSettings.swift \
     Sources/mTerm/App/FontCatalog.swift \
     Sources/mTerm/App/Profile.swift \
-    Sources/mTerm/App/Persistence.swift
+    Sources/mTerm/App/Persistence.swift \
+    Sources/mTerm/Settings/SettingsIndex.swift \
+    Sources/mTerm/Settings/SettingsKeyboard.swift
 
 exec "$out" "$@"

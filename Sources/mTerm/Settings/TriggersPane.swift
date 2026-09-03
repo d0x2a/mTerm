@@ -16,12 +16,6 @@ struct TriggersPane: View {
     /// worth persisting.
     @State private var sample: String = ""
 
-    static let fieldOrder: [SettingsField] = [
-        .triggerList, .triggerAdd, .triggerRemove, .triggerMoveUp, .triggerMoveDown,
-        .triggerEnabled, .triggerName, .triggerPattern, .triggerSample,
-        .triggerStyle, .triggerColor, .triggerAction, .triggerCommand,
-    ]
-
     init(focus: FocusState<SettingsField?>.Binding) {
         self._focus = focus
     }
