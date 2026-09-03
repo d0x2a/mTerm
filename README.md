@@ -44,7 +44,7 @@ swift run -c release mTerm
 
 ## What works today
 
-- AppKit-native window with tabbed sidebar (drag to reorder), full-screen, session restore (tabs + CWDs). The sidebar and split divider tint to the active theme.
+- AppKit-native window with tabbed sidebar (drag to reorder), full-screen, session restore (tabs, their directories and their profiles). The sidebar and split divider tint to the active theme.
 - Metal-rendered terminal view with pixel-snapped glyph atlas — crisp text at all sizes, no GPU filtering blur.
 - Bold and italic draw in the font's own faces, not a synthesised slant or smear, and the advance is identical across all four so the columns never drift. Underline, faint and inverse too, including the codes that turn each of them back off.
 - Resizing reflows the buffer: wrapped lines rejoin and re-split at the new width rather than being cut off, and the grid size shows in a readout while you drag.
@@ -52,28 +52,28 @@ swift run -c release mTerm
 - Mouse reporting: SGR (1006) and legacy encodings for click, drag, motion, and wheel — hold ⇧ to select instead. Bracketed paste, focus events, and device/cursor-position reports.
 - East Asian and fullwidth characters take their proper two columns, and combining marks compose into the glyph they follow, so CJK text stays in step with the shell's own cursor arithmetic.
 - Scrollback search: plain text by default, regex via ⌥⌘F, smart-case.
-- Shell integration for **zsh** via OSC 133: gutter prompt markers (color-coded by exit status), jump to previous/next prompt with ⌘↑ / ⌘↓.
+- Shell integration for **zsh, bash and fish** via OSC 133: gutter prompt markers (color-coded by exit status), jump to previous/next prompt with ⌘↑ / ⌘↓. Nothing is written to your own rc files — each shell gets a wrapper slipped in front of them (`ZDOTDIR` for zsh, `--rcfile` for bash, a `vendor_conf.d` snippet for fish), and it sources your real startup files before layering the hooks on top.
 - Themes: Tomorrow Night, Solarized (light + dark), Nord, Dracula, Gruvbox Dark, plus mTerm's own light + dark. Import any iTerm2 `.itermcolors` file. Auto light/dark switching follows the system appearance.
 - macOS notifications for terminal attention events (bell, OSC 9 / OSC 777) — configurable in Settings.
 - ⌘-click opens links: URLs (with or without a scheme — `code.d0x2a.com` and `localhost:3000/health` both count) go to the browser, file paths are revealed in Finder. Links aren't drawn differently from the text around them until you point at one: with ⌘ held, the link under the pointer takes the theme's accent colour with an underline to match, and the cursor becomes a hand, one link at a time rather than the whole screen at once. Only paths that exist on disk are offered, so `and/or` stays inert, a `file.swift:42` from compiler output links whole, and a URL that wraps across rows is treated as one address rather than two fragments.
 - Close-confirmation when a foreground process is running (`vim`, `ssh`, etc.) — togglable in Settings.
 - Font family, size, stroke weight, and line spacing (1.0×–2.0×, default 1.15×) are all adjustable live in Settings.
+- Scrollback depth is configurable in Settings (1k–100k lines, 10k default).
+- Profiles: a named command, starting directory, environment and optional pinned theme, edited in Settings and stored one JSON file each under `profiles/` so a profile can be shared or checked into a repo. Open one from `File > New Tab with Profile` or ⌘⌥1–9; ⌘T uses whichever is marked default. A profile that pins a theme keeps it whatever the system appearance does, so a production-ssh tab can look different from the rest.
 - Settings window organized into Appearance / General / Notifications panes.
 
 ## Not yet (tracked for v1)
 
-- bash + fish shell integration (zsh only today).
+- User-defined triggers: they're the two built in (URLs and file paths) until there's a store and an editor.
 - tmux `-CC` control mode.
-- Profiles (named shell configurations).
-- Triggers editor UI + `runCommand` action.
 - Settings search.
-- Configurable scrollback size from Settings.
 
 ## Keyboard shortcuts
 
 | Action | Shortcut |
 |---|---|
 | New tab | ⌘T |
+| New tab with profile N | ⌘⌥1 – ⌘⌥9 |
 | Close tab | ⌘W |
 | Next / previous tab | ⌘⇧] / ⌘⇧[  (also ⌘` / ⌘⇧`) |
 | Jump to tab N | ⌘1 – ⌘9 (⌘9 = last) |
@@ -89,7 +89,8 @@ swift run -c release mTerm
 mTerm stores everything under `~/Library/Application Support/mTerm/`:
 
 - `settings.json` — appearance mode, themes, font, close-warning preference.
-- `state.json` — restored on next launch (tabs + window frame + full-screen state).
+- `state.json` — restored on next launch (tabs, their directories and profiles, window frame, full-screen state).
+- `profiles/*.json` — one file per profile (name, command, directory, environment).
 
 There's no config file in v1; everything is editable through the Settings window (⌘,).
 

@@ -217,7 +217,18 @@ Sensible Mac defaults out of the box. All overridable.
 | Scrollback memory | ≤ 200MB for 10k-line buffer with 200-col width |
 | Idle CPU | < 0.1% with one open tab |
 
-These are targets, not measurements. There is no benchmark harness and no perf CI yet — the numbers above are the bar to clear, not results. Individual changes have been measured ad hoc where it mattered; see the release notes.
+These are targets. Two of them now have measurements against them, in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), produced by `scripts/bench.sh` — a
+headless harness that drives the real parser and grid the way `Session.drain`
+does. There is still no perf CI, so nothing catches a regression automatically.
+
+Where it stands: scrollback memory is **met** with 4.8× headroom (41.8 MB for
+10k lines × 200 cols). Throughput is **missed by roughly 34×** — 30 MB/s of
+parsing on an M3 Max against a 1 GB/s parse+render target that was written as
+an aspiration rather than derived from this code. The two latency targets and
+idle CPU are still unmeasured; they need instrumentation inside the app rather
+than a stopwatch. The harness covers the CPU half only and stops where the GPU
+begins.
 
 ## v1 Definition of Done ("Daily-driver minimum")
 
@@ -229,21 +240,23 @@ so nothing is blocked from being ticked by a part of it that hasn't shipped.
 - [x] xterm-256color compatibility (vim/neovim/htop/fzf/less/git)
 - [x] PTY + child process management
 - [x] Scrollback search (plain + regex, smart-case)
-- [ ] Configurable scrollback size — fixed at 10,000 lines today
+- [x] Configurable scrollback size
 - [x] Shell integration for zsh (OSC 133), jump-to-prompt
-- [ ] Shell integration for bash + fish
+- [x] Shell integration for bash + fish
 - [x] Triggers: highlighting, clickable URLs and paths, OSC 8 hyperlinks
-- [ ] Triggers: editor UI and a `runCommand` action
+- [ ] Triggers: persistence and an editor UI — the `runCommand` action runs,
+      but the only triggers that exist are the two built in
 - [ ] tmux `-CC` integration mode
-- [ ] Profiles (simplified model)
+- [x] Profiles: model, store on disk, per-profile command / cwd / env
+- [x] Profiles: Settings editor, New Tab menu, theme override
 - [x] Themes + macOS appearance switching
 - [x] Settings window (Appearance / General / Notifications)
 - [ ] Settings search
-- [x] Session restore
+- [x] Session restore (tabs, their directories and their profiles)
 - [x] Signed + notarized DMG
 - [x] README + screenshots
-- [ ] Simple landing page
-- [ ] Performance benchmarks documented
+- [x] Simple landing page
+- [x] Performance benchmarks documented (`scripts/bench.sh` → docs/BENCHMARKS.md)
 
 Three lines above describe what was built rather than what this document
 originally asked for. Native `NSWindowTabbing` was dropped for the sidebar, for
@@ -255,8 +268,13 @@ AppKit, not SwiftUI — SwiftUI popovers sitting beside native pop-ups read as
 imitations, and an `NSMenu` can't host a search field. Only the *searchable*
 half of that line is still outstanding.
 
-Verification of the compatibility line is by hand and by daily use. There is no
-CI in this repo at all, so nothing would catch a regression in it.
+Verification of the compatibility line is still mostly by hand and by daily
+use. `scripts/statecheck.sh` now covers the grid invariants underneath it —
+wrapping, double-width columns, the scrollback ring and its bound, alt-screen
+history, erase and back-colour erase, reflow on resize, and the per-tab palette
+— by driving the real parser headlessly and asserting on the buffer. It is not
+a compatibility suite and says nothing about vim or htop specifically. There is
+still no CI in this repo, so it only catches what someone remembers to run.
 
 ## Out of v1 (potential v1.x / v2)
 
