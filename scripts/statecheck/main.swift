@@ -447,10 +447,13 @@ do {
         var openOrder: [String] = []
         var closed: [String] = []
         var titles: [String: String] = [:]
+        var openedSizes: [(Int, Int)] = []
         var selected: [String] = []
         var ended = false
         var commands: [String] = []
-        func tmuxOpenTab(windowID: String, title: String) -> TmuxPaneSink {
+        func tmuxOpenTab(windowID: String, title: String,
+                         cols: Int, rows: Int) -> TmuxPaneSink {
+            openedSizes.append((cols, rows))
             let sink = Sink()
             sinks[windowID] = sink
             openOrder.append(windowID)
@@ -475,6 +478,9 @@ do {
     // Replayed in the order a real 3.7c session sent them.
     controller.handle(.windowAdd(window: "@0"))
     check("a window opens a tab", host.openOrder == ["@0"])
+    check("at the tmux client's size, not a placeholder",
+          host.openedSizes.first.map { $0 == (120, 40) } ?? false,
+          "opened at \(host.openedSizes)")
     check("and asks tmux which panes it has",
           host.commands.contains { $0.contains("list-panes -t @0") })
 

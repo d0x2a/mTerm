@@ -22,7 +22,13 @@ protocol TmuxPaneSink: AnyObject {
 
 protocol TmuxControllerHost: AnyObject {
     /// Make a tab for a tmux window and return the grid to feed it.
-    func tmuxOpenTab(windowID: String, title: String) -> TmuxPaneSink
+    ///
+    /// The size is the tmux client's, which every tmux window is sized to.
+    /// Building the grid at a placeholder size and resizing it afterwards
+    /// leaves a window in which output is parsed at the wrong width and then
+    /// reflowed — and reflow rejoins lines a full-screen program never meant
+    /// to be joined.
+    func tmuxOpenTab(windowID: String, title: String, cols: Int, rows: Int) -> TmuxPaneSink
     func tmuxCloseTab(windowID: String)
     func tmuxSetTabTitle(windowID: String, title: String)
     func tmuxSelectTab(windowID: String)
@@ -214,7 +220,8 @@ final class TmuxController {
             if title != id { rename(id: id, to: title) }
             return
         }
-        let sink = host.tmuxOpenTab(windowID: id, title: title)
+        let sink = host.tmuxOpenTab(windowID: id, title: title,
+                                    cols: clientCols, rows: clientRows)
         windows[id] = Window(id: id, title: title, activePane: nil, sink: sink)
         host.tmuxSetTabTitle(windowID: id, title: title)
     }

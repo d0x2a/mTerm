@@ -43,7 +43,8 @@ final class Host: TmuxControllerHost, TmuxCommandSink {
     var titles: [String: String] = [:]
     var ended = false
     var write: ((String) -> Void)?
-    func tmuxOpenTab(windowID: String, title: String) -> TmuxPaneSink {
+    func tmuxOpenTab(windowID: String, title: String,
+                     cols: Int, rows: Int) -> TmuxPaneSink {
         let s = Sink(); sinks[windowID] = s; opened.append(windowID); return s
     }
     func tmuxCloseTab(windowID: String) { closed.append(windowID) }

@@ -153,10 +153,44 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
 
     /// Bytes for this session's grid, from wherever its transport got them.
     /// Parsed on the session queue like a PTY read, so nothing races.
+    ///
+    /// Published on the same cadence `drain` uses, and for the same reason.
+    /// A redraw that is one PTY read from a child process arrives from tmux as
+    /// dozens of `%output` messages, so publishing each one hands the view a
+    /// snapshot taken *between* the pieces of a repaint. Each is a valid grid
+    /// state — which is why the settled grid always matches tmux — but showing
+    /// them is what makes a redraw look torn: half a spinner line with the
+    /// next line's text already written over the rest of it.
     func receive(_ bytes: [UInt8]) {
         queue.async { [weak self] in
             guard let self else { return }
             bytes.withUnsafeBufferPointer { self.parser.feed(bytes: $0) }
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now &- self.lastReceivePublish >= Self.publishInterval {
+                self.lastReceivePublish = now
+                self.publish()
+                self.signalOutput()
+            } else {
+                // Nothing else will come along to publish the tail of a burst,
+                // unlike `drain`, which publishes on its way out.
+                self.scheduleTrailingPublish()
+            }
+        }
+    }
+
+    private var lastReceivePublish: UInt64 = 0
+    private var trailingPublishScheduled = false
+
+    /// Publishes once the burst stops. Runs on the session queue, so it can't
+    /// interleave with a `receive` that is still parsing.
+    private func scheduleTrailingPublish() {
+        guard !trailingPublishScheduled else { return }
+        trailingPublishScheduled = true
+        queue.asyncAfter(deadline: .now() + .nanoseconds(Int(Self.publishInterval))) {
+            [weak self] in
+            guard let self else { return }
+            self.trailingPublishScheduled = false
+            self.lastReceivePublish = DispatchTime.now().uptimeNanoseconds
             self.publish()
             self.signalOutput()
         }

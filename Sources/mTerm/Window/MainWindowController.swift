@@ -431,7 +431,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
 
     func tmuxNewWindow() { tmux?.newWindow() }
 
-    func tmuxOpenTab(windowID: String, title: String) -> TmuxPaneSink {
+    func tmuxOpenTab(windowID: String, title: String, cols: Int, rows: Int) -> TmuxPaneSink {
         let tab = Tab(initialCwd: nil, profile: nil)
         tab.tmuxWindowID = windowID
         tab.displayTitle = title
@@ -440,7 +440,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         // view resizes it to the real grid when it adopts it.
         // This controller is the transport: it is what knows which tab a
         // session belongs to, and so which tmux window its keystrokes are for.
-        let session = Session(cols: 80, rows: 24,
+        // Built at the tmux client's size, not a placeholder — see the
+        // protocol's note on why the resize afterwards was not harmless.
+        let session = Session(cols: cols, rows: rows,
                               transport: self,
                               theme: tab.terminalView.effectiveTheme)
         tab.terminalView.adoptedSession = session
