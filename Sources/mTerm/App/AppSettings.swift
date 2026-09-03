@@ -55,7 +55,9 @@ struct AppSettings: Codable, Equatable {
     var notifyOnlyWhenUnfocused: Bool = true
 
     /// Rows of history kept per tab. Each row costs 16 bytes a column, so
-    /// 10,000 rows at 200 columns is 32 MB — see docs/BENCHMARKS.md.
+    /// 10,000 rows at 200 columns is 30 MB of cells — 42 MB measured, since
+    /// every row is its own array. 100,000 rows is 414 MB, per tab. See
+    /// docs/BENCHMARKS.md.
     var scrollbackLines: Int = 10_000
     /// The choices offered in Settings. A value from a hand-edited file that
     /// isn't one of these is still honoured; the picker just shows it as an

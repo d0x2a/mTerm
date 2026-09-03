@@ -18,7 +18,20 @@ final class Parser {
         case osc
     }
 
-    weak var sink: ParserSink?
+    /// Strong on purpose, and worth 2x on the parse hot path.
+    ///
+    /// `consume` reaches the sink for every printable byte, and a `weak`
+    /// reference cannot be held in a register across that loop: each access
+    /// is a `swift_unknownObjectWeakLoadStrong` — a side-table lock and an
+    /// atomic retain — followed by the matching release. Profiling a 64 MB
+    /// ASCII replay, those two calls were half of all samples on the parsing
+    /// thread, and making this strong took the same replay from 15.6 MB/s to
+    /// 30.8 MB/s (see docs/BENCHMARKS.md).
+    ///
+    /// It cannot cycle: `TerminalState` has no reference back to `Parser`.
+    /// `Session` owns both and outlives them, which is the only ownership
+    /// this reference ever participates in.
+    var sink: ParserSink?
 
     private var state: State = .ground
     private var params: [Int] = []
