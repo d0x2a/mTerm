@@ -1154,6 +1154,13 @@ final class TerminalState: ParserSink {
     /// Remap any cell colors that came from the old theme's foreground,
     /// background, or ANSI palette to the new theme's equivalents. 24-bit and
     /// 256-color-cube cells (explicit user choices) are left alone.
+    /// `ESC k <name> ST`. screen and tmux use it for the window name, which is
+    /// the same thing OSC 0/2 set, so it lands in the same place and the
+    /// sidebar picks it up.
+    func parserWindowName(_ name: [UInt8]) {
+        title = String(decoding: name, as: UTF8.self)
+    }
+
     func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8) {
         onDCSStart?(params, final)
     }

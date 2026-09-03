@@ -7,6 +7,11 @@ protocol ParserSink: AnyObject {
     func parserOSC(_ data: [UInt8], terminator: UInt8)
     func parserESC(_ final: UInt8, intermediates: [UInt8])
 
+    /// `ESC k <name> ST` — the window name, as screen and tmux define it. Not
+    /// an OSC and not a DCS; its own little string sequence, and the one a
+    /// shell reaches for when `TERM` is screen-like.
+    func parserWindowName(_ name: [UInt8])
+
     /// A device control string opened: `ESC P params final`.
     ///
     /// Delivered in three parts rather than as one buffer because a DCS is not
@@ -24,6 +29,7 @@ protocol ParserSink: AnyObject {
 /// device control string it doesn't implement — and emphatically not what
 /// mTerm did before, which was to print the payload as text.
 extension ParserSink {
+    func parserWindowName(_ name: [UInt8]) {}
     func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8) {}
     func parserDCSPut(_ bytes: ArraySlice<UInt8>) {}
     func parserDCSEnd() {}
@@ -43,9 +49,12 @@ final class Parser {
         /// Past the final byte; everything up to the string terminator is
         /// payload and is streamed to the sink as it arrives.
         case dcsPassthrough
-        /// A DCS whose introducer didn't parse. Payload is swallowed rather
-        /// than printed, and the terminator still ends it.
+        /// A DCS whose introducer didn't parse, and the string sequences with
+        /// no meaning here (APC, PM, SOS). Payload is swallowed rather than
+        /// printed, and the terminator still ends it.
         case dcsIgnore
+        /// `ESC k` seen; collecting the window name up to the terminator.
+        case windowName
     }
 
     /// Strong on purpose, and worth 2x on the parse hot path.
@@ -77,6 +86,9 @@ final class Parser {
     /// at the terminator). Per-byte delivery would cost a protocol call per
     /// byte of a tmux session; per-`feed` matches the 8 KB the PTY hands us.
     private var dcsScratch: [UInt8] = []
+    /// Body of a window-name string. Short by nature, so unlike the DCS
+    /// payload it is buffered whole and delivered at the terminator.
+    private var stringBuffer: [UInt8] = []
 
     private var utf8Partial: UInt32 = 0
     private var utf8Remaining: Int = 0
@@ -99,7 +111,8 @@ final class Parser {
     private func consume(_ b: UInt8) {
         // ESC anywhere except inside a string (OSC, DCS) resets us — inside
         // one it is how the ST terminator begins.
-        if b == 0x1B && state != .osc && state != .dcsPassthrough && state != .dcsIgnore {
+        if b == 0x1B && state != .osc && state != .dcsPassthrough
+            && state != .dcsIgnore && state != .windowName {
             state = .escape
             params.removeAll(keepingCapacity: true)
             currentParam = nil
@@ -118,6 +131,7 @@ final class Parser {
         case .dcsEntry:      dcsEntryByte(b)
         case .dcsPassthrough: dcsPassthroughByte(b)
         case .dcsIgnore:     dcsIgnoreByte(b)
+        case .windowName:    windowNameByte(b)
         }
     }
 
@@ -164,6 +178,19 @@ final class Parser {
         case 0x5D:                        // ']'
             oscBuffer.removeAll(keepingCapacity: true)
             state = .osc
+        case 0x6B:                        // 'k' — screen/tmux window name
+            // Same failure as 'P' below: it fell through the 0x30...0x7E case
+            // as an ESC dispatch and the name printed as text. Only visible
+            // under tmux, because that is when TERM goes screen-like and a
+            // shell starts emitting these — oh-my-zsh sets the window name to
+            // the command it is about to run, so running `cd` printed "cd" and
+            // running `claude` printed "claude".
+            stringBuffer.removeAll(keepingCapacity: true)
+            state = .windowName
+        case 0x5F, 0x5E, 0x58:            // '_' APC, '^' PM, 'X' SOS
+            // No meaning here, but they are strings: swallow to the
+            // terminator rather than printing the body.
+            state = .dcsIgnore
         case 0x50:                        // 'P' — DCS
             // Without this, 'P' fell through the 0x30...0x7E case below as an
             // ESC dispatch and the payload printed as text: `ESC P 1000 p`
@@ -280,6 +307,26 @@ final class Parser {
             return
         }
         dcsScratch.append(b)
+    }
+
+    private func windowNameByte(_ b: UInt8) {
+        if b == 0x1B {                    // ESC — the ST terminator's first half
+            sink?.parserWindowName(stringBuffer)
+            stringBuffer.removeAll(keepingCapacity: true)
+            state = .escape
+            params.removeAll(keepingCapacity: true)
+            currentParam = nil
+            marker = nil
+            intermediates.removeAll(keepingCapacity: true)
+            return
+        }
+        if b == 0x07 {                    // BEL, accepted as a terminator too
+            sink?.parserWindowName(stringBuffer)
+            stringBuffer.removeAll(keepingCapacity: true)
+            state = .ground
+            return
+        }
+        stringBuffer.append(b)
     }
 
     private func dcsIgnoreByte(_ b: UInt8) {

@@ -305,6 +305,45 @@ do {
     check("text after the terminator prints again", recorder.text == "visible")
 }
 
+section("string sequences that are not OSC")
+do {
+    // Inside tmux, TERM goes screen-like and a shell starts setting the window
+    // name with `ESC k <name> ST`. oh-my-zsh sets it to the command it is
+    // about to run, so before this was handled, running `cd` printed a stray
+    // "cd" and running `claude` printed "claude" — at column 0, on the line
+    // after the prompt.
+    let (state, feed) = buffer(cols: 30, rows: 3)
+    feed("\u{1b}kcd\u{1b}\\ok")
+    check("a window name is not printed as text",
+          row(state.snapshot(), 0) == "ok",
+          "row 0 is \"\(row(state.snapshot(), 0))\"")
+    check("and it becomes the title", state.snapshot().title == "cd",
+          "title is \"\(state.snapshot().title)\"")
+
+    // The real thing, from a captured session: a truncated path, BEL-free,
+    // ST-terminated.
+    let (b2, f2) = buffer(cols: 40, rows: 3)
+    f2("\u{1b}k..fd/scratchpad\u{1b}\\$ ls")
+    check("the captured form leaves only the prompt",
+          row(b2.snapshot(), 0) == "$ ls", "row 0 is \"\(row(b2.snapshot(), 0))\"")
+    check("with the name as the title", b2.snapshot().title == "..fd/scratchpad")
+
+    // BEL terminates it too, the way it does an OSC.
+    let (b3, f3) = buffer(cols: 30, rows: 3)
+    f3("\u{1b}kbell\u{0007}after")
+    check("BEL ends a window name", row(b3.snapshot(), 0) == "after",
+          "row 0 is \"\(row(b3.snapshot(), 0))\"")
+
+    // APC, PM and SOS carry bodies nothing here reads. They must not print.
+    for (name, intro) in [("APC", "_"), ("PM", "^"), ("SOS", "X")] {
+        let (b, f) = buffer(cols: 30, rows: 3)
+        f("\u{1b}\(intro)secret payload\u{1b}\\visible")
+        check("\(name) payload is swallowed, not printed",
+              row(b.snapshot(), 0) == "visible",
+              "row 0 is \"\(row(b.snapshot(), 0))\"")
+    }
+}
+
 section("tmux control mode")
 do {
     var events: [TmuxEvent] = []
