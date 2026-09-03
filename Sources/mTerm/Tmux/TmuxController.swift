@@ -186,8 +186,12 @@ final class TmuxController {
                 return
             }
             if let marker = lines.first(where: { $0.hasPrefix(Self.captureTag + " ") }) {
-                apply(capture: lastUntaggedReply,
-                      window: String(marker.dropFirst(Self.captureTag.count + 1)))
+                // "mtermC <window> <cursor_x> <cursor_y>"
+                let f = marker.split(separator: " ").map(String.init)
+                if f.count >= 4 {
+                    apply(capture: lastUntaggedReply, window: f[1],
+                          cursor: (x: Int(f[2]) ?? 0, y: Int(f[3]) ?? 0))
+                }
                 lastUntaggedReply = []
                 captureInFlight = false
                 sendNextCapture()
@@ -363,22 +367,33 @@ final class TmuxController {
             // program's next draw brings colour back. No `-J` either: joining
             // wrapped lines would hand back rows wider than the pane.
             send("capture-pane -p -t \(next.pane)")
-            // Named by window, not pane: `display-message` reads a `%` as the
-            // start of a format.
-            send("display-message -p '\(Self.captureTag) \(next.window)'")
+            // The marker carries the cursor, because `capture-pane` does not.
+            // Without it the repaint leaves the cursor at the end of the last
+            // captured line and the program carries on from there — which
+            // scrolled everything up and left the screen blank above the
+            // content. `-t` targets the pane so the cursor formats refer to
+            // it; the window id goes in the text because `display-message`
+            // reads a `%` in a format as an escape.
+            send("display-message -p -t \(next.pane) "
+                 + "'\(Self.captureTag) \(next.window) #{cursor_x} #{cursor_y}'")
             return
         }
     }
 
-    /// Repaints a window's grid from what tmux says its pane holds.
-    private func apply(capture lines: [String], window id: String) {
+    /// Repaints a window's grid from what tmux says its pane holds, and puts
+    /// the cursor back where tmux says it is.
+    private func apply(capture lines: [String], window id: String,
+                       cursor: (x: Int, y: Int)) {
         guard let window = windows[id] else { return }
         var out = "\u{1b}[H\u{1b}[J"      // home, then erase below
         for (i, line) in lines.enumerated() {
             out += "\u{1b}[\(i + 1);1H\u{1b}[m" + line + "\u{1b}[K"
         }
-        // The cursor isn't in the capture; the program puts it back on its
-        // next draw.
+        // Last, and not optional: leaving the cursor at the end of the final
+        // captured line means the program's next newline scrolls the screen,
+        // which pushed everything to the bottom with blank space above it.
+        // tmux's coordinates are 0-based, CUP is 1-based.
+        out += "\u{1b}[\(cursor.y + 1);\(cursor.x + 1)H"
         window.sink.receive(Array(out.utf8))
     }
 

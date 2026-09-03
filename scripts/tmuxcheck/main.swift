@@ -190,6 +190,9 @@ check("and never with -e, which would end the control-mode DCS",
       "capture-pane -e returns raw ESC bytes; control mode is one long DCS")
 // The stream surviving is the real assertion: an ESC in a reply used to end
 // the DCS, after which every notification below was parsed as terminal output.
+check("the marker carries the cursor, which the capture omits",
+      host.commands.contains { $0.contains("#{cursor_x}") && $0.contains("#{cursor_y}") },
+      "without it the repaint leaves the cursor at the bottom and the next newline scrolls")
 check("and the control stream is still alive afterwards",
       host.commands.contains { $0.hasPrefix("display-message") },
       "the marker that claims the capture never went out")
