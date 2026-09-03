@@ -6,6 +6,27 @@ protocol ParserSink: AnyObject {
     func parserCSI(_ params: [Int], marker: UInt8?, intermediates: [UInt8], final: UInt8)
     func parserOSC(_ data: [UInt8], terminator: UInt8)
     func parserESC(_ final: UInt8, intermediates: [UInt8])
+
+    /// A device control string opened: `ESC P params final`.
+    ///
+    /// Delivered in three parts rather than as one buffer because a DCS is not
+    /// necessarily short. `tmux -CC` opens one (`ESC P 1000 p`) and then keeps
+    /// it open for the life of the session, streaming every pane's output
+    /// through it, so a parser that waited for the terminator would buffer the
+    /// entire session and deliver it once, at exit.
+    func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8)
+    func parserDCSPut(_ bytes: ArraySlice<UInt8>)
+    func parserDCSEnd()
+}
+
+/// DCS is ignorable: a sink that has no use for one can leave these alone and
+/// the payload is simply dropped, which is what a terminal should do with a
+/// device control string it doesn't implement — and emphatically not what
+/// mTerm did before, which was to print the payload as text.
+extension ParserSink {
+    func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8) {}
+    func parserDCSPut(_ bytes: ArraySlice<UInt8>) {}
+    func parserDCSEnd() {}
 }
 
 final class Parser {
@@ -16,6 +37,15 @@ final class Parser {
         case csiParam
         case csiIgnore
         case osc
+        /// `ESC P` seen; collecting parameters and intermediates up to the
+        /// final byte.
+        case dcsEntry
+        /// Past the final byte; everything up to the string terminator is
+        /// payload and is streamed to the sink as it arrives.
+        case dcsPassthrough
+        /// A DCS whose introducer didn't parse. Payload is swallowed rather
+        /// than printed, and the terminator still ends it.
+        case dcsIgnore
     }
 
     /// Strong on purpose, and worth 2x on the parse hot path.
@@ -43,6 +73,10 @@ final class Parser {
     private var marker: UInt8? = nil
     private var intermediates: [UInt8] = []
     private var oscBuffer: [UInt8] = []
+    /// DCS payload accumulated within one `feed` call, flushed at its end (or
+    /// at the terminator). Per-byte delivery would cost a protocol call per
+    /// byte of a tmux session; per-`feed` matches the 8 KB the PTY hands us.
+    private var dcsScratch: [UInt8] = []
 
     private var utf8Partial: UInt32 = 0
     private var utf8Remaining: Int = 0
@@ -51,11 +85,21 @@ final class Parser {
         for b in bytes {
             consume(b)
         }
+        // Whatever payload this chunk ended mid-stream. The terminator path
+        // flushes itself, before it reports the end.
+        flushDCS()
+    }
+
+    private func flushDCS() {
+        guard !dcsScratch.isEmpty else { return }
+        sink?.parserDCSPut(dcsScratch[...])
+        dcsScratch.removeAll(keepingCapacity: true)
     }
 
     private func consume(_ b: UInt8) {
-        // ESC anywhere except inside OSC's terminator parsing resets us.
-        if b == 0x1B && state != .osc {
+        // ESC anywhere except inside a string (OSC, DCS) resets us — inside
+        // one it is how the ST terminator begins.
+        if b == 0x1B && state != .osc && state != .dcsPassthrough && state != .dcsIgnore {
             state = .escape
             params.removeAll(keepingCapacity: true)
             currentParam = nil
@@ -71,6 +115,9 @@ final class Parser {
         case .csiParam:      csiParamByte(b)
         case .csiIgnore:     csiIgnoreByte(b)
         case .osc:           oscByte(b)
+        case .dcsEntry:      dcsEntryByte(b)
+        case .dcsPassthrough: dcsPassthroughByte(b)
+        case .dcsIgnore:     dcsIgnoreByte(b)
         }
     }
 
@@ -117,6 +164,11 @@ final class Parser {
         case 0x5D:                        // ']'
             oscBuffer.removeAll(keepingCapacity: true)
             state = .osc
+        case 0x50:                        // 'P' — DCS
+            // Without this, 'P' fell through the 0x30...0x7E case below as an
+            // ESC dispatch and the payload printed as text: `ESC P 1000 p`
+            // from `tmux -CC` put a literal "1000p" on screen.
+            state = .dcsEntry
         case 0x20...0x2F:
             intermediates.append(b)
         case 0x30...0x7E:
@@ -180,6 +232,66 @@ final class Parser {
         if let p = currentParam { params.append(p) }
         currentParam = nil
         sink?.parserCSI(params, marker: marker, intermediates: intermediates, final: final)
+    }
+
+    // MARK: DCS
+
+    /// Parameters and intermediates, exactly as CSI collects them, up to the
+    /// final byte that names the control.
+    private func dcsEntryByte(_ b: UInt8) {
+        switch b {
+        case 0x30...0x39:                 // digit
+            currentParam = (currentParam ?? 0) * 10 + Int(b - 0x30)
+        case 0x3B:                        // ';'
+            params.append(currentParam ?? 0)
+            currentParam = nil
+        case 0x3C...0x3F:                 // private marker
+            marker = b
+        case 0x20...0x2F:                 // intermediate
+            intermediates.append(b)
+        case 0x40...0x7E:                 // final
+            if let p = currentParam { params.append(p) }
+            currentParam = nil
+            sink?.parserDCSStart(params, intermediates: intermediates, final: b)
+            state = .dcsPassthrough
+        default:
+            state = .dcsIgnore
+        }
+    }
+
+    /// Payload. Handed to the sink a byte at a time is too slow for a stream
+    /// that carries a whole tmux session, so runs between terminators are
+    /// passed as slices — see `feed`.
+    private func dcsPassthroughByte(_ b: UInt8) {
+        if b == 0x1B {                    // ESC — the ST terminator's first half
+            flushDCS()                    // payload before the end, not after
+            sink?.parserDCSEnd()
+            state = .escape
+            params.removeAll(keepingCapacity: true)
+            currentParam = nil
+            marker = nil
+            intermediates.removeAll(keepingCapacity: true)
+            return
+        }
+        if b == 0x07 {                    // BEL, accepted as a terminator too
+            flushDCS()
+            sink?.parserDCSEnd()
+            state = .ground
+            return
+        }
+        dcsScratch.append(b)
+    }
+
+    private func dcsIgnoreByte(_ b: UInt8) {
+        if b == 0x1B {
+            state = .escape
+            params.removeAll(keepingCapacity: true)
+            currentParam = nil
+            marker = nil
+            intermediates.removeAll(keepingCapacity: true)
+            return
+        }
+        if b == 0x07 { state = .ground }
     }
 
     private func oscByte(_ b: UInt8) {
