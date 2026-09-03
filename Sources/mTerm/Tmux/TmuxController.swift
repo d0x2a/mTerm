@@ -88,6 +88,21 @@ final class TmuxController {
     private static let windowTag = "mtermW"
     private static let paneTag = "mtermP"
 
+    /// Marks the end of a capture. `capture-pane` takes no format, so its
+    /// reply cannot carry a tag of its own — and it cannot be spotted as "the
+    /// untagged one" either, because `refresh-client` and `select-window`
+    /// answer with empty blocks constantly and an empty capture looks exactly
+    /// like one. Mistaking one for a capture blanks the pane.
+    ///
+    /// So every capture is followed by a `display-message` naming the window
+    /// it was for. Replies arrive in order, so the capture is whatever came
+    /// immediately before its marker — relative, needing no assumption about
+    /// what went before.
+    private static let captureTag = "mtermC"
+    private var lastUntaggedReply: [String] = []
+    private var captureQueue: [(window: String, pane: String)] = []
+    private var captureInFlight = false
+
     private(set) var isActive = false
 
     /// Grid the tmux client is told to use. tmux sizes its windows to the
@@ -127,6 +142,9 @@ final class TmuxController {
         windows.removeAll()
         windowForPane.removeAll()
         orphanedOutput.removeAll()
+        captureQueue.removeAll()
+        captureInFlight = false
+        lastUntaggedReply = []
         for id in ids { host.tmuxCloseTab(windowID: id) }
         host.tmuxDidEnd()
     }
@@ -162,10 +180,39 @@ final class TmuxController {
             end()
 
         case .reply(_, let lines, let error):
-            guard !error else { return }
-            absorb(lines)
+            guard !error else {
+                // A marker that never comes would strand the queue.
+                if captureInFlight { captureInFlight = false; sendNextCapture() }
+                return
+            }
+            if let marker = lines.first(where: { $0.hasPrefix(Self.captureTag + " ") }) {
+                apply(capture: lastUntaggedReply,
+                      window: String(marker.dropFirst(Self.captureTag.count + 1)))
+                lastUntaggedReply = []
+                captureInFlight = false
+                sendNextCapture()
+                return
+            }
+            if lines.contains(where: {
+                $0.hasPrefix(Self.windowTag) || $0.hasPrefix(Self.paneTag)
+            }) {
+                absorb(lines)
+                return
+            }
+            lastUntaggedReply = lines
 
-        case .layoutChange, .sessionChanged, .sessionsChanged, .other:
+        case .layoutChange(let id, _):
+            // A resize. tmux answers with this and does *not* resend the pane
+            // — a normal client gets a redraw, a control-mode one is expected
+            // to re-sync — so the grid still holds the pre-resize screen,
+            // clipped or padded. Whatever the program doesn't repaint of its
+            // own accord stays stale: the top border of Claude Code's input
+            // box came back as a two-character stub.
+            if let pane = windows[id]?.activePane {
+                requestCapture(window: id, pane: pane)
+            }
+
+        case .sessionChanged, .sessionsChanged, .other:
             break
         }
     }
@@ -249,11 +296,10 @@ final class TmuxController {
         if let buffered = orphanedOutput.removeValue(forKey: pane) {
             window.sink.receive(buffered)
         }
-        // Note what a tab does *not* get: the pane's existing contents. tmux
-        // sends %output as it happens and does not replay on request, so a tab
-        // that switches to a pane starts from whatever arrives next until the
-        // program in it repaints. Filling it in means `capture-pane -p -e -J`
-        // and feeding the reply, which is worth doing and isn't done here.
+        // The pane's existing contents, which `%output` never replays — tmux
+        // sends it as it happens. Without this, a tab switched to a pane shows
+        // nothing until the program in it repaints.
+        requestCapture(window: windowID, pane: pane)
     }
 
     private func deliver(pane: String, bytes: [UInt8]) {
@@ -286,6 +332,54 @@ final class TmuxController {
 
     private func send(_ command: String) {
         commands?.sendTmuxCommand(command)
+    }
+
+    // MARK: re-syncing a pane from tmux
+
+    private func requestCapture(window: String, pane: String) {
+        // Collapse duplicates: a window drag produces a layout change per
+        // step, and one capture at the end is what matters.
+        guard !captureQueue.contains(where: { $0.window == window }) else { return }
+        captureQueue.append((window: window, pane: pane))
+        sendNextCapture()
+    }
+
+    private func sendNextCapture() {
+        guard !captureInFlight else { return }
+        while let next = captureQueue.first {
+            captureQueue.removeFirst()
+            // The window may have closed between the request and now.
+            guard let window = windows[next.window],
+                  window.activePane == next.pane else { continue }
+            captureInFlight = true
+            // Deliberately **not** `-e`. That returns the pane with its escape
+            // sequences intact, which means raw ESC bytes — and control mode is
+            // one long DCS that a raw ESC terminates. Asking for it tore down
+            // the control stream mid-reply: every notification after it was
+            // parsed as ordinary terminal output, so windows stopped closing
+            // and the session never reported its exit.
+            //
+            // So the repaint restores text and layout but not colour, and the
+            // program's next draw brings colour back. No `-J` either: joining
+            // wrapped lines would hand back rows wider than the pane.
+            send("capture-pane -p -t \(next.pane)")
+            // Named by window, not pane: `display-message` reads a `%` as the
+            // start of a format.
+            send("display-message -p '\(Self.captureTag) \(next.window)'")
+            return
+        }
+    }
+
+    /// Repaints a window's grid from what tmux says its pane holds.
+    private func apply(capture lines: [String], window id: String) {
+        guard let window = windows[id] else { return }
+        var out = "\u{1b}[H\u{1b}[J"      // home, then erase below
+        for (i, line) in lines.enumerated() {
+            out += "\u{1b}[\(i + 1);1H\u{1b}[m" + line + "\u{1b}[K"
+        }
+        // The cursor isn't in the capture; the program puts it back on its
+        // next draw.
+        window.sink.receive(Array(out.utf8))
     }
 
     // MARK: input

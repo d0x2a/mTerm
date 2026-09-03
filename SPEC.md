@@ -127,12 +127,21 @@ between panes; you see one at a time, filling the tab. Compositing them from
 `%layout-change` would mean building split rendering into the Metal view, which
 is the thing the non-goal rules out.
 
-What that leaves undone, deliberately, in v1: a tab switching to a pane starts
-from the output that arrives next rather than the pane's existing contents,
-because tmux does not replay on request (`capture-pane -p -e -J` would fill it
-in). One attached session; no detach/reattach or session switching. And tmux
-tabs are not restored across launches — the server may be gone, and
-reattaching is the user's call.
+A tab re-syncs itself from `capture-pane` when it is shown a pane and when the
+pane is resized. Both are cases tmux does not replay for a control-mode client:
+`%output` is sent as it happens, and a resize brings `%layout-change` and
+nothing else, so without asking, a tab shows a pre-resize screen with only the
+parts the program chose to repaint corrected.
+
+The capture is taken **without `-e`**. With it, tmux returns the pane's escape
+sequences as raw ESC bytes — and control mode is one long DCS that a raw ESC
+terminates, so asking for it tore down the control stream mid-reply and every
+notification after was parsed as ordinary terminal output. Colour therefore
+comes back on the program's next draw rather than from the capture.
+
+What that leaves undone, deliberately, in v1: one attached session; no
+detach/reattach or session switching. And tmux tabs are not restored across
+launches — the server may be gone, and reattaching is the user's call.
 
 ## Profiles (Simplified)
 

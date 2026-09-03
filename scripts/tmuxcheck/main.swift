@@ -51,7 +51,11 @@ final class Host: TmuxControllerHost, TmuxCommandSink {
     func tmuxSetTabTitle(windowID: String, title: String) { titles[windowID] = title }
     func tmuxSelectTab(windowID: String) {}
     func tmuxDidEnd() { ended = true }
-    func sendTmuxCommand(_ command: String) { write?(command + "\n") }
+    var commands: [String] = []
+    func sendTmuxCommand(_ command: String) {
+        commands.append(command)
+            write?(command + "\n")
+    }
 }
 
 // MARK: spawn a real tmux -CC on a pty
@@ -80,11 +84,26 @@ if pid == 0 {
     _exit(1)
 }
 
+var log: [String] = []
 let host = Host()
 let controller = TmuxController(host: host, commands: host)
-host.write = { command in
-    let bytes = Array(command.utf8)
-    _ = bytes.withUnsafeBufferPointer { write(master, $0.baseAddress, $0.count) }
+// Commands are queued, not written from inside the parse path. Writing
+// synchronously there deadlocks: the controller sends from an event handler,
+// which runs inside `pump`, so when tmux blocks writing output that nobody is
+// draining, our write blocks too and neither side moves — the stream stopped
+// dead mid-reply. `Pty.write` flushes on its own queue for exactly this
+// reason; the harness has to alternate reading and writing by hand.
+var outbox: [UInt8] = []
+host.write = { command in outbox.append(contentsOf: Array(command.utf8)) }
+
+func flushOutbox() {
+    while !outbox.isEmpty {
+        var p = pollfd(fd: master, events: Int16(POLLOUT), revents: 0)
+        guard poll(&p, 1, 0) > 0 else { return }        // not writable; try later
+        let n = outbox.withUnsafeBufferPointer { write(master, $0.baseAddress, $0.count) }
+        guard n > 0 else { return }
+        outbox.removeFirst(n)
+    }
 }
 
 // The chain, wired exactly as Session wires it.
@@ -92,12 +111,14 @@ let state = TerminalState(cols: 80, rows: 24)
 let parser = Parser()
 parser.sink = state
 var client: TmuxControlClient?
-var log: [String] = []
 state.onDCSStart = { params, final in
     guard params.first == 1000, final == UInt8(ascii: "p") else { return }
     let c = TmuxControlClient()
     c.onEvent = { event in
-        if case .output = event {} else { log.append("\(event)") }
+        switch event {
+        case .output: break
+        default: log.append("\(event)")
+        }
         controller.handle(event)
     }
     client = c
@@ -110,6 +131,7 @@ func pump(_ seconds: Double) {
     var buf = [UInt8](repeating: 0, count: 8192)
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
+        flushOutbox()
         var fds = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
         guard poll(&fds, 1, 100) > 0 else { continue }
         let n = buf.withUnsafeMutableBufferPointer { read(master, $0.baseAddress, $0.count) }
@@ -153,19 +175,34 @@ check("keystrokes reach the pane and its output comes back",
       "tab shows: \(String((second?.text ?? "").suffix(120)).debugDescription)")
 
 print("-- resize --")
+// tmux answers a resize with %layout-change and does *not* resend the pane, so
+// a control-mode client has to ask. Without this the grid keeps the pre-resize
+// screen and whatever the program doesn't repaint stays stale — the top border
+// of Claude Code's input box came back as a two-character stub.
+host.commands = []
 controller.setClientSize(cols: 100, rows: 30)
-pump(1.5)
-check("a resize is accepted without an error reply", true, "no %error path taken")
+pump(5.0)
+check("a resize asks tmux for the pane's contents",
+      host.commands.contains { $0.hasPrefix("capture-pane -p -t") },
+      "commands: \(host.commands)")
+check("and never with -e, which would end the control-mode DCS",
+      !host.commands.contains { $0.contains("capture-pane") && $0.contains("-e") },
+      "capture-pane -e returns raw ESC bytes; control mode is one long DCS")
+// The stream surviving is the real assertion: an ESC in a reply used to end
+// the DCS, after which every notification below was parsed as terminal output.
+check("and the control stream is still alive afterwards",
+      host.commands.contains { $0.hasPrefix("display-message") },
+      "the marker that claims the capture never went out")
 
 print("-- close a window --")
 controller.killWindow(id: target)
-pump(2.0)
+pump(5.0)
 check("closing a tmux window closes its tab", host.closed.contains(target),
       "closed \(host.closed)")
 
 print("-- exit --")
 host.sendTmuxCommand("kill-session")
-pump(2.5)
+pump(5.0)
 check("killing the session ends control mode", host.ended)
 check("and the remaining tab was closed", host.closed.contains(firstWindow),
       "closed \(host.closed)")
