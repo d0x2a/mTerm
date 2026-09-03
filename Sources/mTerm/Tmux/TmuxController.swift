@@ -66,18 +66,21 @@ final class TmuxController {
     /// pane -> window, learned from `list-panes`.
     private var windowForPane: [String: String] = [:]
 
-    /// What each outstanding command asked for. tmux answers commands in the
-    /// order they were sent, one block each, so a queue is enough to tell a
-    /// `list-windows` reply from a `list-panes` one — and to stop a future
-    /// command's output being read as either. Matching on the shape of the
-    /// lines instead, as this first did, means any reply with an `@`-prefixed
-    /// line can invent a window.
-    private enum Expecting {
-        case windowList
-        case paneList
-        case nothing
-    }
-    private var pendingReplies: [Expecting] = []
+    /// Replies identify themselves, because neither of the other two options
+    /// works.
+    ///
+    /// Matching on the shape of the lines lets any reply containing an
+    /// `@`-prefixed line invent a window. Counting replies in order looks
+    /// right — tmux answers one block per command, in order — but it is not:
+    /// tmux emits an unsolicited `%begin`/`%end` block on attach, before any
+    /// command has been sent, which shifts the whole queue by one and had
+    /// `list-windows` output being read as a pane list.
+    ///
+    /// So the format strings carry a literal tag. A line that begins with one
+    /// came from the command that asked for it and from nothing else, whatever
+    /// order it arrives in.
+    private static let windowTag = "mtermW"
+    private static let paneTag = "mtermP"
 
     private(set) var isActive = false
 
@@ -103,9 +106,8 @@ final class TmuxController {
         // Ask for the window list rather than waiting to be told: attaching to
         // an existing session emits %window-add only for what changes, so the
         // windows that were already there would never appear.
-        send("list-windows -F '#{window_id} #{window_name}'", expecting: .windowList)
-        send("list-panes -a -F '#{window_id} #{pane_id} #{?pane_active,active,}'",
-             expecting: .paneList)
+        send("list-windows -F '\(Self.windowTag) #{window_id} #{window_name}'")
+        send("list-panes -a -F '\(Self.paneTag) #{window_id} #{pane_id} #{?pane_active,active,}'")
     }
 
     func end() {
@@ -116,7 +118,6 @@ final class TmuxController {
         windows.removeAll()
         windowForPane.removeAll()
         orphanedOutput.removeAll()
-        pendingReplies.removeAll()
         for id in ids { host.tmuxCloseTab(windowID: id) }
         host.tmuxDidEnd()
     }
@@ -132,17 +133,13 @@ final class TmuxController {
         case .windowAdd(let id):
             openWindow(id: id, title: id)
             // A new window's panes aren't in any list we've asked for yet.
-            send("list-panes -t \(id) -F '#{window_id} #{pane_id} #{?pane_active,active,}'",
-                 expecting: .paneList)
+            send("list-panes -t \(id) -F '\(Self.paneTag) #{window_id} #{pane_id} #{?pane_active,active,}'")
 
         case .windowClose(let id):
             closeWindow(id: id)
 
         case .windowRenamed(let id, let name):
-            guard var window = windows[id] else { return }
-            window.title = name
-            windows[id] = window
-            host.tmuxSetTabTitle(windowID: id, title: name)
+            rename(id: id, to: name)
 
         case .windowPaneChanged(let id, let pane):
             setActivePane(pane, of: id)
@@ -156,52 +153,67 @@ final class TmuxController {
             end()
 
         case .reply(_, let lines, let error):
-            let expecting = pendingReplies.isEmpty ? .nothing : pendingReplies.removeFirst()
             guard !error else { return }
-            switch expecting {
-            case .windowList: absorbWindowList(lines)
-            case .paneList:   absorbPaneList(lines)
-            case .nothing:    break
-            }
+            absorb(lines)
 
         case .layoutChange, .sessionChanged, .sessionsChanged, .other:
             break
         }
     }
 
-    /// `#{window_id} #{window_name}` per line.
-    private func absorbWindowList(_ lines: [String]) {
+    /// Tagged lines out of any reply block. An untagged line is somebody
+    /// else's business, including tmux's own attach block.
+    private func absorb(_ lines: [String]) {
         for line in lines {
-            let fields = line.split(separator: " ", maxSplits: 1).map(String.init)
-            guard let id = fields.first, id.hasPrefix("@") else { continue }
-            openWindow(id: id, title: fields.count > 1 ? fields[1] : id)
-        }
-    }
-
-    /// `#{window_id} #{pane_id} [active]` per line. A window with no active
-    /// pane yet adopts the first one listed, so a tab is never left showing
-    /// nothing because tmux happened not to mark one.
-    private func absorbPaneList(_ lines: [String]) {
-        for line in lines {
-            let fields = line.split(separator: " ", maxSplits: 2).map(String.init)
-            guard fields.count >= 2,
-                  let windowID = fields.first, windowID.hasPrefix("@"),
-                  fields[1].hasPrefix("%")
-            else { continue }
-            let pane = fields[1]
-            windowForPane[pane] = windowID
-            if windows[windowID] == nil { openWindow(id: windowID, title: windowID) }
-            let isActive = fields.count >= 3 && fields[2] == "active"
-            if isActive || windows[windowID]?.activePane == nil {
-                setActivePane(pane, of: windowID)
+            let fields = line.split(separator: " ", maxSplits: 3).map(String.init)
+            guard let tag = fields.first else { continue }
+            switch tag {
+            case Self.windowTag:
+                // mtermW <window-id> <window-name>
+                guard fields.count >= 2, fields[1].hasPrefix("@") else { continue }
+                openWindow(id: fields[1],
+                           title: fields.count >= 3 ? fields[2...].joined(separator: " ")
+                                                    : fields[1])
+            case Self.paneTag:
+                // mtermP <window-id> <pane-id> [active]
+                guard fields.count >= 3,
+                      fields[1].hasPrefix("@"), fields[2].hasPrefix("%")
+                else { continue }
+                let windowID = fields[1], pane = fields[2]
+                windowForPane[pane] = windowID
+                if windows[windowID] == nil { openWindow(id: windowID, title: windowID) }
+                // A window tmux hasn't marked adopts the first pane listed, so
+                // a tab is never left showing nothing.
+                let isActive = fields.count >= 4 && fields[3] == "active"
+                if isActive || windows[windowID]?.activePane == nil {
+                    setActivePane(pane, of: windowID)
+                }
+            default:
+                continue
             }
         }
     }
 
     // MARK: windows
 
+    private func rename(id: String, to name: String) {
+        guard var window = windows[id], window.title != name else { return }
+        window.title = name
+        windows[id] = window
+        host.tmuxSetTabTitle(windowID: id, title: name)
+    }
+
     private func openWindow(id: String, title: String) {
-        guard windows[id] == nil else { return }
+        if windows[id] != nil {
+            // Already open, and a real name still has to land: on attach
+            // `%window-add @0` arrives before the `list-windows` reply, so the
+            // window is created with its id as a placeholder and the name from
+            // the list comes second. Guarding that out left every restored tab
+            // titled "@0". The placeholder itself must not overwrite a name
+            // that has since arrived, hence the `title != id`.
+            if title != id { rename(id: id, to: title) }
+            return
+        }
         let sink = host.tmuxOpenTab(windowID: id, title: title)
         windows[id] = Window(id: id, title: title, activePane: nil, sink: sink)
         host.tmuxSetTabTitle(windowID: id, title: title)
@@ -262,8 +274,7 @@ final class TmuxController {
         send("select-window -t \(id)")
     }
 
-    private func send(_ command: String, expecting: Expecting = .nothing) {
-        pendingReplies.append(expecting)
+    private func send(_ command: String) {
         commands?.sendTmuxCommand(command)
     }
 
@@ -285,13 +296,6 @@ final class TmuxController {
         clientCols = cols
         clientRows = rows
         send("refresh-client -C \(cols)x\(rows)")
-    }
-
-    /// Asks tmux for the pane list again. Only `statecheck` needs to trigger
-    /// this by hand; the app gets it from `start` and from `%window-add`.
-    func sendPaneListForTest() {
-        send("list-panes -a -F '#{window_id} #{pane_id} #{?pane_active,active,}'",
-             expecting: .paneList)
     }
 
     /// Which window a tab is showing, for callers that hold the id.

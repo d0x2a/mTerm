@@ -116,8 +116,14 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
             self?.tmuxClient?.feed(bytes)
         }
         state.onDCSEnd = { [weak self] in
-            self?.tmuxClient?.finish()
-            self?.tmuxClient = nil
+            guard let self, self.tmuxClient != nil else { return }
+            self.tmuxClient?.finish()
+            self.tmuxClient = nil
+            // tmux closes the string when it goes away, and does not always
+            // get a `%exit` out first — a detach or a killed server just ends
+            // it. Report one anyway, or the tabs its windows were in would be
+            // left showing a session that no longer exists.
+            DispatchQueue.main.async { self.onTmuxEvent?(.exit(reason: "")) }
         }
         startReadLoop()
     }

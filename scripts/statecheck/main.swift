@@ -445,11 +445,7 @@ do {
     check("output for an unplaced pane is held, not dropped",
           host.sinks["@0"]?.text == "", "nothing should have been delivered yet")
 
-    // start() sent list-windows then list-panes; window-add sent another
-    // list-panes. Answer them in order, the way tmux does.
-    controller.handle(.reply(id: 1, lines: [], error: false))          // list-windows
-    controller.handle(.reply(id: 2, lines: [], error: false))          // list-panes -a
-    controller.handle(.reply(id: 3, lines: ["@0 %0 active"], error: false))
+    controller.handle(.reply(id: 3, lines: ["mtermP @0 %0 active"], error: false))
     check("once the pane is placed, the held output is delivered",
           host.sinks["@0"]?.text == "early", "got \"\(host.sinks["@0"]?.text ?? "")\"")
 
@@ -457,8 +453,7 @@ do {
     check("and later output follows it", host.sinks["@0"]?.text == "early then")
 
     // A second pane in the same window: only the active one is shown.
-    controller.sendPaneListForTest()
-    controller.handle(.reply(id: 4, lines: ["@0 %1"], error: false))
+    controller.handle(.reply(id: 4, lines: ["mtermP @0 %1"], error: false))
     controller.handle(.output(pane: "%1", bytes: Array("hidden".utf8)))
     check("a non-active pane's output does not reach the tab",
           host.sinks["@0"]?.text == "early then",
@@ -485,7 +480,7 @@ do {
     controller.handle(.windowRenamed(window: "@0", name: "editor"))
     check("a rename retitles the tab", host.titles["@0"] == "editor")
     controller.handle(.windowAdd(window: "@1"))
-    controller.handle(.reply(id: 5, lines: ["@1 %2 active"], error: false))
+    controller.handle(.reply(id: 5, lines: ["mtermP @1 %2 active"], error: false))
     controller.handle(.sessionWindowChanged(session: "$0", window: "@1"))
     check("tmux moving to another window selects that tab",
           host.selected.last == "@1")
@@ -497,11 +492,23 @@ do {
     check("a resize is sent once, not per event",
           host.commands == ["refresh-client -C 100x30"], "got \(host.commands)")
 
-    // The reason replies are correlated rather than sniffed: an uncorrelated
-    // block whose lines happen to start with '@' would otherwise create tabs.
+    // Why the format strings carry a tag: tmux emits an unsolicited block on
+    // attach, so counting replies in order shifts everything by one, and
+    // sniffing the shape of the lines lets any '@' line invent a window.
     host.openOrder = []
     controller.handle(.reply(id: 99, lines: ["@7 not-a-window"], error: false))
-    check("a reply nobody asked for cannot invent a window", host.openOrder.isEmpty)
+    check("an untagged reply cannot invent a window", host.openOrder.isEmpty)
+    controller.handle(.reply(id: 100, lines: ["0: zsh* (1 panes) [80x24]"], error: false))
+    check("nor can tmux's own attach block", host.openOrder.isEmpty)
+    // On attach, %window-add arrives before the list-windows reply, so a
+    // window is created with its id as a placeholder and named a moment
+    // later. Guarding that out left every tab titled "@0".
+    controller.handle(.reply(id: 101, lines: ["mtermW @0 named by list"], error: false))
+    check("a name from list-windows reaches a tab that already exists",
+          host.titles["@0"] == "named by list", "got \(host.titles["@0"] ?? "nil")")
+    controller.handle(.reply(id: 102, lines: ["mtermW @0 @0"], error: false))
+    check("but the id placeholder cannot overwrite a real name",
+          host.titles["@0"] == "named by list", "got \(host.titles["@0"] ?? "nil")")
 
     // Closing.
     controller.handle(.windowClose(window: "@1"))
