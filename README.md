@@ -56,16 +56,13 @@ swift run -c release mTerm
 - Themes: Tomorrow Night, Solarized (light + dark), Nord, Dracula, Gruvbox Dark, plus mTerm's own light + dark. Import any iTerm2 `.itermcolors` file. Auto light/dark switching follows the system appearance.
 - macOS notifications for terminal attention events (bell, OSC 9 / OSC 777) — configurable in Settings.
 - ⌘-click opens links: URLs (with or without a scheme — `code.d0x2a.com` and `localhost:3000/health` both count) go to the browser, file paths are revealed in Finder. Links aren't drawn differently from the text around them until you point at one: with ⌘ held, the link under the pointer takes the theme's accent colour with an underline to match, and the cursor becomes a hand, one link at a time rather than the whole screen at once. Only paths that exist on disk are offered, so `and/or` stays inert, a `file.swift:42` from compiler output links whole, and a URL that wraps across rows is treated as one address rather than two fragments.
+- tmux control mode: run `tmux -CC` and each tmux window becomes a real mTerm tab — ⌘T makes a tmux window, ⌘W closes one, renames and window switches follow tmux both ways. A tab shows its window's **active pane** and follows tmux when you move between panes; mTerm has no splits, and in control mode tmux sends each pane separately rather than a composited screen. One session at a time, and detaching ends the tabs rather than reattaching.
 - Close-confirmation when a foreground process is running (`vim`, `ssh`, etc.) — togglable in Settings.
 - Font family, size, stroke weight, and line spacing (1.0×–2.0×, default 1.15×) are all adjustable live in Settings.
 - Triggers: a regex plus what to do with what it matches — highlight it, recolour it, underline it, or make ⌘-click open it as a URL, reveal it in Finder, or run a command with `$1` as the match. Edited in Settings with an inline tester that runs the real regex, and stored in `triggers.json`. Your rules are tried before the two built-in ones (URLs and file paths), which can be switched off but not edited — their patterns are maintained in mTerm and improve between releases.
 - Profiles: a named command, starting directory, environment and optional pinned theme, edited in Settings and stored one JSON file each under `profiles/` so a profile can be shared or checked into a repo. Open one from `File > New Tab with Profile` or ⌘⌥1–9; ⌘T uses whichever is marked default. A profile that pins a theme keeps it whatever the system appearance does, so a production-ssh tab can look different from the rest.
 - Settings window organized into Appearance / Profiles / Triggers / General / Notifications panes, with a search field over the sidebar that finds a control by what it's called or by what you'd call it — "antialiasing" finds stroke weight, "history" finds the scrollback depth — and takes you to it with the focus ring on it.
 - Shell integration can be switched off in Settings, and the scrollback depth picked there too (1k–100k lines; the pane shows what each costs per tab).
-
-## Not yet (tracked for v1)
-
-- tmux `-CC` control mode.
 
 ## Keyboard shortcuts
 

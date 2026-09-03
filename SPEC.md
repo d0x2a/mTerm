@@ -113,9 +113,26 @@ No collapsible "blocks." No reformatting of output. The terminal still looks lik
 (Kept from iTerm — `-CC` mode.)
 
 - When the user runs `tmux -CC` (or `tmux -CC attach`), mTerm detects the control protocol on stdout and switches the tab into **tmux control mode**.
-- Each tmux window becomes a native mTerm tab. tmux panes within a window are still rendered by tmux (no native split UI), but the user can move between them with tmux's own keys.
+- Each tmux window becomes a native mTerm tab.
 - New native tabs created in this mode forward to `new-window` in tmux.
 - Disconnect cleanly when tmux exits.
+
+**Panes.** This section used to say tmux panes "are still rendered by tmux".
+They aren't, and can't be: in control mode tmux never sends a composited
+window, only each pane's output separately as `%output %0`, `%output %1`. There
+is no combined screen to draw. Since mTerm has no splits — a non-goal above —
+a window's tab shows its **active pane**, following `%window-pane-changed` as
+tmux moves. Splitting inside tmux still works and tmux's own keys still move
+between panes; you see one at a time, filling the tab. Compositing them from
+`%layout-change` would mean building split rendering into the Metal view, which
+is the thing the non-goal rules out.
+
+What that leaves undone, deliberately, in v1: a tab switching to a pane starts
+from the output that arrives next rather than the pane's existing contents,
+because tmux does not replay on request (`capture-pane -p -e -J` would fill it
+in). One attached session; no detach/reattach or session switching. And tmux
+tabs are not restored across launches — the server may be gone, and
+reattaching is the user's call.
 
 ## Profiles (Simplified)
 
@@ -245,7 +262,7 @@ so nothing is blocked from being ticked by a part of it that hasn't shipped.
 - [x] Shell integration for bash + fish
 - [x] Triggers: highlighting, clickable URLs and paths, OSC 8 hyperlinks
 - [x] Triggers: persistence and an editor UI, incl. the `runCommand` action
-- [ ] tmux `-CC` integration mode
+- [x] tmux `-CC` integration mode (active pane per tab — see **tmux Integration Mode**)
 - [x] Profiles: model, store on disk, per-profile command / cwd / env
 - [x] Profiles: Settings editor, New Tab menu, theme override
 - [x] Themes + macOS appearance switching
