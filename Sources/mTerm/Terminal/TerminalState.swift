@@ -306,6 +306,13 @@ final class TerminalState: ParserSink {
         return true
     }
 
+    /// A device control string the child opened, fired on the parser queue in
+    /// stream order. `Session` watches these for `tmux -CC`'s `ESC P 1000 p`;
+    /// nothing here knows what any particular DCS means.
+    var onDCSStart: ((_ params: [Int], _ final: UInt8) -> Void)?
+    var onDCSPut: ((ArraySlice<UInt8>) -> Void)?
+    var onDCSEnd: (() -> Void)?
+
     /// Fired on the parser (session) queue when the child writes BEL (0x07).
     /// Session marshals this to the main thread.
     var onBell: (() -> Void)?
@@ -1147,6 +1154,18 @@ final class TerminalState: ParserSink {
     /// Remap any cell colors that came from the old theme's foreground,
     /// background, or ANSI palette to the new theme's equivalents. 24-bit and
     /// 256-color-cube cells (explicit user choices) are left alone.
+    func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8) {
+        onDCSStart?(params, final)
+    }
+
+    func parserDCSPut(_ bytes: ArraySlice<UInt8>) {
+        onDCSPut?(bytes)
+    }
+
+    func parserDCSEnd() {
+        onDCSEnd?()
+    }
+
     func applyThemeChange(from old: Theme, to new: Theme) {
         theme = new
         defaultFg = PackedColor(new.foreground)

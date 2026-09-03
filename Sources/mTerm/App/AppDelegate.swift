@@ -141,6 +141,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openNewTab(_ sender: Any?) {
         guard let controller = activeController() else { return }
+        // In tmux control mode ⌘T makes a tmux window, not a local shell —
+        // otherwise the sidebar would mix tabs tmux knows about with tabs it
+        // doesn't, and the two would drift apart on every detach.
+        if controller.isTmuxActive {
+            controller.tmuxNewWindow()
+            return
+        }
         // New tabs always start in the user's home directory.
         // Tab.init resolves nil to NSHomeDirectory().
         controller.newTab(initialCwd: nil)

@@ -13,6 +13,10 @@ final class Tab {
     /// opened with ⌘T follows the user's later change of default rather than
     /// pinning itself to whatever was default when it opened.
     let profileId: UUID?
+    /// Set when this tab shows a tmux window rather than a shell of its own.
+    /// Closing it closes the tmux window; it is not restored across launches,
+    /// because the tmux server may be gone and reattaching is the user's call.
+    var tmuxWindowID: String?
 
     init(initialCwd: String?, profile: Profile? = nil) {
         let v = TerminalView(frame: .zero)

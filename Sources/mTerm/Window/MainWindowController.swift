@@ -13,10 +13,13 @@ protocol TerminalViewDelegate: AnyObject {
     func terminalViewDidTerminate(_ view: TerminalView)
     func terminalView(_ view: TerminalView, didRequestAttention attention: TerminalAttention)
     func terminalView(_ view: TerminalView, didResizeGridTo cols: Int, rows: Int)
+    /// The child in this tab is speaking tmux control mode.
+    func terminalView(_ view: TerminalView, didReceiveTmuxEvent event: TmuxEvent)
 }
 
 final class MainWindowController: NSWindowController, NSWindowDelegate,
-                                  SidebarDelegate, TerminalViewDelegate {
+                                  SidebarDelegate, TerminalViewDelegate,
+                                  TmuxControllerHost, SessionTransport {
     /// NSWindowController.window is `unowned(unsafe)` — without our own strong
     /// reference the window would deallocate before NSApp.windows can grab it.
     private let retainedWindow: NSWindow
@@ -32,6 +35,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     private let splitVC = WideDividerSplitViewController()
     private let gridHUD = GridSizeHUD()
     private var gridHUDHideTimer: Timer?
+
+    /// Live while a tab in this window is running `tmux -CC`. One per window:
+    /// a second `tmux -CC` elsewhere in the same window would be a second set
+    /// of tabs fighting over the same sidebar.
+    private var tmux: TmuxController?
+    /// True while a tmux window's tab is being torn down by the controller,
+    /// so `closeTab` doesn't ask tmux to kill a window it is already closing.
+    private var closingFromTmux = false
 
     /// `openInitialTab: false` builds an empty window for `restoreTabs` to
     /// fill. Opening one and throwing it away would spawn a shell nobody asked
@@ -127,6 +138,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
 
     func selectTab(_ id: UUID) {
         guard tabs.contains(where: { $0.id == id }) else { return }
+        // Keep tmux's current window in step with the sidebar, so a command
+        // typed in another client lands where the user is looking.
+        if let tab = tabs.first(where: { $0.id == id }), let windowID = tab.tmuxWindowID,
+           activeTabId != id, tmux?.isActive == true {
+            tmux?.selectWindow(id: windowID)
+        }
         activeTabId = id
         installActiveTerminalView()
         refreshSidebar()
@@ -137,6 +154,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
 
     func closeTab(_ id: UUID) {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        // A tmux window's tab is a view onto tmux, not something we own.
+        // Closing it closes the window there, and tmux tells us to drop the
+        // tab — doing it ourselves would leave the window running with nothing
+        // showing it.
+        if let windowID = tab.tmuxWindowID, !closingFromTmux, tmux?.isActive == true {
+            tmux?.killWindow(id: windowID)
+            return
+        }
         if ThemeStore.shared.settings.warnOnCloseWithRunningProcess,
            let process = tab.terminalView.foregroundProcess {
             confirmCloseTab(named: process.name) { [weak self] confirmed in
@@ -386,6 +411,82 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         if !anotherTerminalRemains {
             SettingsWindowController.closeIfOpen()
         }
+    }
+
+    // MARK: tmux control mode
+
+    func terminalView(_ view: TerminalView, didReceiveTmuxEvent event: TmuxEvent) {
+        if tmux == nil {
+            guard let session = view.session else { return }
+            let controller = TmuxController(host: self, commands: session)
+            tmux = controller
+            let grid = view.gridSize() ?? (cols: 80, rows: 24)
+            controller.start(cols: grid.cols, rows: grid.rows)
+        }
+        tmux?.handle(event)
+    }
+
+    /// True when ⌘T should make a tmux window rather than a local shell.
+    var isTmuxActive: Bool { tmux?.isActive ?? false }
+
+    func tmuxNewWindow() { tmux?.newWindow() }
+
+    func tmuxOpenTab(windowID: String, title: String) -> TmuxPaneSink {
+        let tab = Tab(initialCwd: nil, profile: nil)
+        tab.tmuxWindowID = windowID
+        tab.displayTitle = title
+        tab.terminalView.delegate = self
+        // Built before the view is laid out, so at a placeholder size; the
+        // view resizes it to the real grid when it adopts it.
+        // This controller is the transport: it is what knows which tab a
+        // session belongs to, and so which tmux window its keystrokes are for.
+        let session = Session(cols: 80, rows: 24,
+                              transport: self,
+                              theme: tab.terminalView.effectiveTheme)
+        tab.terminalView.adoptedSession = session
+        tabs.append(tab)
+        selectTab(tab.id)
+        return session
+    }
+
+    func tmuxCloseTab(windowID: String) {
+        guard let tab = tabs.first(where: { $0.tmuxWindowID == windowID }) else { return }
+        closingFromTmux = true
+        forceCloseTab(tab.id)
+        closingFromTmux = false
+    }
+
+    func tmuxSetTabTitle(windowID: String, title: String) {
+        guard let tab = tabs.first(where: { $0.tmuxWindowID == windowID }) else { return }
+        tab.displayTitle = title
+        refreshSidebar()
+        if activeTabId == tab.id { window?.title = displayWindowTitle(for: tab) }
+    }
+
+    func tmuxSelectTab(windowID: String) {
+        guard let tab = tabs.first(where: { $0.tmuxWindowID == windowID }) else { return }
+        guard activeTabId != tab.id else { return }
+        selectTab(tab.id)
+    }
+
+    func tmuxDidEnd() {
+        tmux = nil
+    }
+
+    // MARK: SessionTransport
+    //
+    // A tmux-backed session has no child: its keystrokes become `send-keys`
+    // on the control connection, and its size becomes the tmux client's.
+
+    func sessionWrite(_ bytes: [UInt8], from session: Session) {
+        guard let tab = tabs.first(where: { $0.terminalView.session === session }),
+              let windowID = tab.tmuxWindowID
+        else { return }
+        tmux?.sendKeys(window: windowID, bytes: bytes)
+    }
+
+    func sessionResize(cols: Int, rows: Int, from session: Session) {
+        tmux?.setClientSize(cols: cols, rows: rows)
     }
 
     // MARK: NSWindowDelegate close confirmation

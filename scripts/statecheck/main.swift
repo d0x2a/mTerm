@@ -394,6 +394,131 @@ do {
           events == [.reply(id: 9, lines: ["partial"], error: true)])
 }
 
+section("tmux window-to-tab mapping")
+do {
+    final class Sink: TmuxPaneSink {
+        var received: [UInt8] = []
+        var closed = false
+        func receive(_ bytes: [UInt8]) { received.append(contentsOf: bytes) }
+        func transportClosed() { closed = true }
+        var text: String { String(decoding: received, as: UTF8.self) }
+    }
+    final class Host: TmuxControllerHost, TmuxCommandSink {
+        var sinks: [String: Sink] = [:]
+        var openOrder: [String] = []
+        var closed: [String] = []
+        var titles: [String: String] = [:]
+        var selected: [String] = []
+        var ended = false
+        var commands: [String] = []
+        func tmuxOpenTab(windowID: String, title: String) -> TmuxPaneSink {
+            let sink = Sink()
+            sinks[windowID] = sink
+            openOrder.append(windowID)
+            return sink
+        }
+        func tmuxCloseTab(windowID: String) { closed.append(windowID) }
+        func tmuxSetTabTitle(windowID: String, title: String) { titles[windowID] = title }
+        func tmuxSelectTab(windowID: String) { selected.append(windowID) }
+        func tmuxDidEnd() { ended = true }
+        func sendTmuxCommand(_ command: String) { commands.append(command) }
+    }
+
+    let host = Host()
+    let controller = TmuxController(host: host, commands: host)
+    controller.start(cols: 120, rows: 40)
+    check("attaching sizes the tmux client to the tab",
+          host.commands.contains("refresh-client -C 120x40"))
+    check("and asks for the windows that already exist",
+          host.commands.contains { $0.hasPrefix("list-windows") },
+          "%window-add only covers what changes after attach")
+
+    // Replayed in the order a real 3.7c session sent them.
+    controller.handle(.windowAdd(window: "@0"))
+    check("a window opens a tab", host.openOrder == ["@0"])
+    check("and asks tmux which panes it has",
+          host.commands.contains { $0.contains("list-panes -t @0") })
+
+    // Output before we know where the pane lives — this is where a new
+    // window's first prompt arrives.
+    controller.handle(.output(pane: "%0", bytes: Array("early".utf8)))
+    check("output for an unplaced pane is held, not dropped",
+          host.sinks["@0"]?.text == "", "nothing should have been delivered yet")
+
+    // start() sent list-windows then list-panes; window-add sent another
+    // list-panes. Answer them in order, the way tmux does.
+    controller.handle(.reply(id: 1, lines: [], error: false))          // list-windows
+    controller.handle(.reply(id: 2, lines: [], error: false))          // list-panes -a
+    controller.handle(.reply(id: 3, lines: ["@0 %0 active"], error: false))
+    check("once the pane is placed, the held output is delivered",
+          host.sinks["@0"]?.text == "early", "got \"\(host.sinks["@0"]?.text ?? "")\"")
+
+    controller.handle(.output(pane: "%0", bytes: Array(" then".utf8)))
+    check("and later output follows it", host.sinks["@0"]?.text == "early then")
+
+    // A second pane in the same window: only the active one is shown.
+    controller.sendPaneListForTest()
+    controller.handle(.reply(id: 4, lines: ["@0 %1"], error: false))
+    controller.handle(.output(pane: "%1", bytes: Array("hidden".utf8)))
+    check("a non-active pane's output does not reach the tab",
+          host.sinks["@0"]?.text == "early then",
+          "got \"\(host.sinks["@0"]?.text ?? "")\"")
+
+    controller.handle(.windowPaneChanged(window: "@0", pane: "%1"))
+    controller.handle(.output(pane: "%1", bytes: Array("now visible".utf8)))
+    check("switching the active pane switches what the tab shows",
+          host.sinks["@0"]?.text.hasSuffix("now visible") == true,
+          "got \"\(host.sinks["@0"]?.text ?? "")\"")
+
+    // Input goes to the pane the tab is showing, as hex.
+    host.commands = []
+    controller.sendKeys(window: "@0", bytes: [0x6c, 0x73, 0x0d])
+    check("keys go to the active pane as hex",
+          host.commands == ["send-keys -t %1 -H 6c 73 0d"],
+          "got \(host.commands)")
+
+    host.commands = []
+    controller.sendKeys(window: "@nope", bytes: [0x61])
+    check("keys for an unknown window go nowhere", host.commands.isEmpty)
+
+    // Renames and selection follow tmux.
+    controller.handle(.windowRenamed(window: "@0", name: "editor"))
+    check("a rename retitles the tab", host.titles["@0"] == "editor")
+    controller.handle(.windowAdd(window: "@1"))
+    controller.handle(.reply(id: 5, lines: ["@1 %2 active"], error: false))
+    controller.handle(.sessionWindowChanged(session: "$0", window: "@1"))
+    check("tmux moving to another window selects that tab",
+          host.selected.last == "@1")
+
+    // Resize goes to the client, once per actual change.
+    host.commands = []
+    controller.setClientSize(cols: 100, rows: 30)
+    controller.setClientSize(cols: 100, rows: 30)
+    check("a resize is sent once, not per event",
+          host.commands == ["refresh-client -C 100x30"], "got \(host.commands)")
+
+    // The reason replies are correlated rather than sniffed: an uncorrelated
+    // block whose lines happen to start with '@' would otherwise create tabs.
+    host.openOrder = []
+    controller.handle(.reply(id: 99, lines: ["@7 not-a-window"], error: false))
+    check("a reply nobody asked for cannot invent a window", host.openOrder.isEmpty)
+
+    // Closing.
+    controller.handle(.windowClose(window: "@1"))
+    check("closing a window closes its tab", host.closed.contains("@1"))
+    check("and the sink is told", host.sinks["@1"]?.closed == true)
+
+    controller.handle(.exit(reason: ""))
+    check("exit closes what is left", host.closed.contains("@0"))
+    check("and reports the mode is over", host.ended)
+    check("the last window's sink is closed too", host.sinks["@0"]?.closed == true)
+
+    // Nothing should be acted on after the end.
+    host.openOrder = []
+    controller.handle(.windowAdd(window: "@9"))
+    check("events after exit are ignored", host.openOrder.isEmpty)
+}
+
 section("settings search")
 do {
     // The index is also the Tab order, so a gap here is a control nobody can

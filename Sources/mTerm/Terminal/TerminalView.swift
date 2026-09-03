@@ -11,7 +11,9 @@ final class TerminalView: NSView, CALayerDelegate {
     private var surface: TerminalSurface? { superview as? TerminalSurface }
     private var renderer: Renderer? { surface?.renderer }
 
-    private var session: Session?
+    /// Readable so the window controller can hand this tab's session to a
+    /// `TmuxController` as its command channel.
+    private(set) var session: Session?
     private var displayLink: CADisplayLink?
 
     /// Live instances, maintained by `init`/`deinit`. Compare it against the
@@ -39,6 +41,9 @@ final class TerminalView: NSView, CALayerDelegate {
     /// Optional CWD passed in before the session is created. Used by ⌘T (inherit
     /// from the active tab) and by session restore on launch.
     var initialCwd: String?
+    /// A session made elsewhere for this view to use instead of spawning one.
+    /// Set for a tab that shows a tmux window; see `ensureSession`.
+    var adoptedSession: Session?
     /// Profile this tab was opened with. nil follows whatever `ProfileStore`
     /// calls default at spawn time, which is what ⌘T has always done.
     var profile: Profile?
@@ -1224,6 +1229,10 @@ final class TerminalView: NSView, CALayerDelegate {
 
     // MARK: setup
 
+    /// The current grid, for callers outside the view that need to size
+    /// something to it — the tmux client, which sizes its windows to us.
+    func gridSize() -> (cols: Int, rows: Int)? { gridDimensions() }
+
     private func gridDimensions() -> (cols: Int, rows: Int)? {
         guard let renderer, let metalLayer = surface?.metalLayer else { return nil }
         let ds = metalLayer.drawableSize
@@ -1242,8 +1251,23 @@ final class TerminalView: NSView, CALayerDelegate {
         // theme, a profile-themed tab would open by remapping a buffer that
         // was already in the right colours.
         lastAppliedTheme = effectiveTheme
-        let s = Session(cols: cols, rows: rows, cwd: initialCwd, profile: profile,
+        // A tmux window's session is built by the controller, before this view
+        // has been laid out and so before it knows its grid — the controller
+        // needs something to route `%output` into straight away. Adopt it and
+        // tell it the real size; there is no child to spawn.
+        let s: Session?
+        if let provided = adoptedSession {
+            adoptedSession = nil
+            provided.resize(cols: cols, rows: rows)
+            s = provided
+        } else {
+            s = Session(cols: cols, rows: rows, cwd: initialCwd, profile: profile,
                         theme: lastAppliedTheme)
+        }
+        s?.onTmuxEvent = { [weak self] event in
+            guard let self else { return }
+            self.delegate?.terminalView(self, didReceiveTmuxEvent: event)
+        }
         s?.onOutput = { [weak self] in
             self?.sessionDidOutput()
         }

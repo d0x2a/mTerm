@@ -1,8 +1,24 @@
 import Darwin
 import Foundation
 
-final class Session {
-    private let pty: Pty
+/// Where a session's bytes go when it has no PTY of its own.
+///
+/// A tab showing a tmux window has no child process: its output arrives as
+/// `%output` on another tab's control connection, and its input has to leave
+/// the same way. Everything else about the session — the parser, the grid,
+/// scrollback, search, selection — is unchanged, which is the point of putting
+/// the seam here rather than making the view care.
+protocol SessionTransport: AnyObject {
+    func sessionWrite(_ bytes: [UInt8], from session: Session)
+    func sessionResize(cols: Int, rows: Int, from session: Session)
+}
+
+final class Session: TmuxCommandSink, TmuxPaneSink {
+    /// nil for a tmux-backed session, which has a transport instead.
+    private let pty: Pty?
+    /// Set for a tmux-backed session. Weak: the controller owns the tabs that
+    /// own these sessions.
+    private weak var transport: SessionTransport?
     private let parser = Parser()
     private let state: TerminalState
 
@@ -55,6 +71,14 @@ final class Session {
     /// `title` is empty when the escape carried only a body (OSC 9).
     var onNotify: ((_ title: String, _ body: String) -> Void)?
 
+    /// Control-mode events, on the main thread and in stream order, once the
+    /// child in this tab has run `tmux -CC`. The bytes are parsed on the
+    /// session queue; only the events cross over.
+    var onTmuxEvent: ((TmuxEvent) -> Void)?
+    /// Live only while the child holds control mode open.
+    private var tmuxClient: TmuxControlClient?
+    var isTmuxControlActive: Bool { tmuxClient != nil }
+
     /// `cwd` overrides the profile's own directory — session restore hands
     /// back the tab's last one. Main-thread only, for `ProfileStore`.
     init?(cols: Int, rows: Int, cwd: String? = nil, profile: Profile? = nil,
@@ -78,7 +102,63 @@ final class Session {
         state.onReply = { [weak pty] bytes in
             pty?.write(bytes)
         }
+        // `tmux -CC` announces itself with ESC P 1000 p and then keeps that
+        // string open for the whole session, streaming every pane through it.
+        state.onDCSStart = { [weak self] params, final in
+            guard params.first == 1000, final == UInt8(ascii: "p") else { return }
+            let client = TmuxControlClient()
+            client.onEvent = { [weak self] event in
+                DispatchQueue.main.async { self?.onTmuxEvent?(event) }
+            }
+            self?.tmuxClient = client
+        }
+        state.onDCSPut = { [weak self] bytes in
+            self?.tmuxClient?.feed(bytes)
+        }
+        state.onDCSEnd = { [weak self] in
+            self?.tmuxClient?.finish()
+            self?.tmuxClient = nil
+        }
         startReadLoop()
+    }
+
+    /// A session with no child of its own, fed by `receive` and writing back
+    /// through `transport`. The grid is built at the size the caller asks for
+    /// and reflows the same way any other does.
+    init(cols: Int, rows: Int, transport: SessionTransport,
+         theme: Theme = ThemeStore.currentTheme) {
+        self.pty = nil
+        self.transport = transport
+        self.state = TerminalState(cols: cols, rows: rows, theme: theme)
+        self.parser.sink = state
+        state.onBell = { [weak self] in
+            DispatchQueue.main.async { self?.onBell?() }
+        }
+        state.onNotify = { [weak self] title, body in
+            DispatchQueue.main.async { self?.onNotify?(title, body) }
+        }
+        // Device reports go back to tmux, which forwards them to the program
+        // in the pane — it queried the terminal and is waiting for an answer.
+        state.onReply = { [weak self] bytes in
+            guard let self else { return }
+            DispatchQueue.main.async { self.transport?.sessionWrite(bytes, from: self) }
+        }
+    }
+
+    /// Bytes for this session's grid, from wherever its transport got them.
+    /// Parsed on the session queue like a PTY read, so nothing races.
+    func receive(_ bytes: [UInt8]) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            bytes.withUnsafeBufferPointer { self.parser.feed(bytes: $0) }
+            self.publish()
+            self.signalOutput()
+        }
+    }
+
+    /// Ends a tmux-backed session, the way EOF ends a PTY-backed one.
+    func transportClosed() {
+        notifyChildExit()
     }
 
     deinit {
@@ -184,7 +264,11 @@ final class Session {
 
     /// See Pty.foregroundProcess(). Called from the main thread on close.
     func foregroundProcess() -> (pid: pid_t, name: String)? {
-        pty.foregroundProcess()
+        // A tmux-backed tab has no child of its own to ask about. What runs in
+        // the pane is tmux's business, and closing the tab closes a tmux
+        // window rather than killing anything of ours — so there is nothing to
+        // warn about on close.
+        pty?.foregroundProcess()
     }
 
     /// Returns a new scrollOffset that jumps to the nearest prompt above
@@ -214,7 +298,17 @@ final class Session {
     }
 
     func write(_ bytes: [UInt8]) {
-        pty.write(bytes)
+        if let pty {
+            pty.write(bytes)
+        } else {
+            transport?.sessionWrite(bytes, from: self)
+        }
+    }
+
+    /// Sends one control-mode command to the tmux running in this tab.
+    func sendTmuxCommand(_ command: String) {
+        guard tmuxClient != nil else { return }
+        write(Array((command + "\n").utf8))
     }
 
     func resize(cols: Int, rows: Int) {
@@ -226,10 +320,15 @@ final class Session {
             self.state.resize(cols: cols, rows: rows)
             self.publish()
         }
-        pty.resize(cols: cols, rows: rows)
+        if let pty {
+            pty.resize(cols: cols, rows: rows)
+        } else {
+            transport?.sessionResize(cols: cols, rows: rows, from: self)
+        }
     }
 
     private func startReadLoop() {
+        guard let pty else { return }
         let src = DispatchSource.makeReadSource(fileDescriptor: pty.masterFd, queue: queue)
         src.setEventHandler { [weak self] in
             self?.drain()
@@ -269,6 +368,7 @@ final class Session {
     private static let publishInterval: UInt64 = 8_000_000   // ns
 
     private func drain() {
+        guard let pty else { return }
         var produced = false
         defer { if produced { publish(); signalOutput() } }
         var lastPublish = DispatchTime.now().uptimeNanoseconds
