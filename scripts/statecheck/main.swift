@@ -413,6 +413,12 @@ do {
           events == [.windowClose(window: "@1")])
 
     events = []
+    send("%unlinked-window-add @42\r\n")
+    check("but an unlinked add does not count as an add",
+          events == [.other(name: "unlinked-window-add", arguments: "@42")],
+          "it is another session's window — got \(events)")
+
+    events = []
     send("%exit \r\n")
     send("%exit\r\n")
     check("exit is read with or without a reason", events.count == 2)
@@ -483,6 +489,10 @@ do {
           "opened at \(host.openedSizes)")
     check("and asks tmux which panes it has",
           host.commands.contains { $0.contains("list-panes -t @0") })
+    check("pane listing is scoped to this session, not the whole server",
+          host.commands.contains { $0.hasPrefix("list-panes -s") }
+          && !host.commands.contains { $0.hasPrefix("list-panes -a") },
+          "-a lists every session's panes and gives each window a tab")
 
     // Output before we know where the pane lives — this is where a new
     // window's first prompt arrives.
@@ -559,6 +569,12 @@ do {
     controller.handle(.windowClose(window: "@1"))
     check("closing a window closes its tab", host.closed.contains("@1"))
     check("and the sink is told", host.sinks["@1"]?.closed == true)
+
+    // A window in another session must not appear here. tmux says so
+    // explicitly: %unlinked-window-add is "not linked to the current session".
+    host.openOrder = []
+    controller.handle(.other(name: "unlinked-window-add", arguments: "@42"))
+    check("another session's window gets no tab", host.openOrder.isEmpty)
 
     controller.handle(.exit(reason: ""))
     check("exit closes what is left", host.closed.contains("@0"))

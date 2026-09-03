@@ -100,9 +100,16 @@ final class TmuxControlClient {
         case "output":
             let (pane, data) = split(rest)
             onEvent?(.output(pane: pane, bytes: Self.unescape(data)))
-        case "window-add", "unlinked-window-add":
+        case "window-add":
+            // Deliberately not `%unlinked-window-add`, which tmux documents as
+            // "created but is *not* linked to the current session" — another
+            // session's window, and none of our business. Treating the two
+            // alike put a tab in the sidebar for a window belonging to a
+            // session nobody here is attached to.
             onEvent?(.windowAdd(window: rest))
         case "window-close", "unlinked-window-close":
+            // Both, unlike add: killing a window reports the unlinked form,
+            // because tmux has already unlinked it by the time it says so.
             onEvent?(.windowClose(window: rest))
         case "window-renamed", "unlinked-window-renamed":
             let (window, newName) = split(rest)

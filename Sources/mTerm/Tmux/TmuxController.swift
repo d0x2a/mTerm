@@ -113,7 +113,10 @@ final class TmuxController {
         // an existing session emits %window-add only for what changes, so the
         // windows that were already there would never appear.
         send("list-windows -F '\(Self.windowTag) #{window_id} #{window_name}'")
-        send("list-panes -a -F '\(Self.paneTag) #{window_id} #{pane_id} #{?pane_active,active,}'")
+        // `-s`, every pane in *this session*. `-a` is every pane on the
+        // server, which pulls in windows from sessions nobody here is
+        // attached to and gives each one a tab.
+        send("list-panes -s -F '\(Self.paneTag) #{window_id} #{pane_id} #{?pane_active,active,}'")
     }
 
     func end() {

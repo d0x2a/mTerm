@@ -56,6 +56,17 @@ final class Host: TmuxControllerHost, TmuxCommandSink {
 
 // MARK: spawn a real tmux -CC on a pty
 
+// A second session on the same server, detached and nothing to do with us.
+// Its windows must not become tabs: `list-panes -a` listed every pane on the
+// *server*, so one of them did — titled with its raw id, because list-windows
+// (correctly scoped to the session) never named it.
+let seed = Process()
+seed.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+seed.arguments = ["tmux", "-L", socket, "-f", "/dev/null",
+                  "new-session", "-d", "-s", "bystander"]
+try? seed.run()
+seed.waitUntilExit()
+
 var master: Int32 = 0
 var size = winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
 let pid = forkpty(&master, nil, nil, &size)
@@ -72,7 +83,7 @@ if pid == 0 {
 let host = Host()
 let controller = TmuxController(host: host, commands: host)
 host.write = { command in
-    var bytes = Array(command.utf8)
+    let bytes = Array(command.utf8)
     _ = bytes.withUnsafeBufferPointer { write(master, $0.baseAddress, $0.count) }
 }
 
@@ -113,9 +124,10 @@ print("-- attach --")
 pump(3.0)
 check("control mode was detected", client != nil,
       "the DCS never reached the client")
-check("the first tmux window opened a tab", host.opened == ["@0"],
-      "opened \(host.opened)")
-let first = host.sinks["@0"]
+check("exactly one tab, for our own session's window", host.opened.count == 1,
+      "opened \(host.opened) — an extra entry is the bystander session's")
+let firstWindow = host.opened.first ?? "@0"
+let first = host.sinks[firstWindow]
 check("and the shell's prompt reached that tab's grid",
       (first?.bytes.count ?? 0) > 0,
       "\(first?.bytes.count ?? 0) bytes")
@@ -155,7 +167,7 @@ print("-- exit --")
 host.sendTmuxCommand("kill-session")
 pump(2.5)
 check("killing the session ends control mode", host.ended)
-check("and the remaining tab was closed", host.closed.contains("@0"),
+check("and the remaining tab was closed", host.closed.contains(firstWindow),
       "closed \(host.closed)")
 
 if failures > 0 {
