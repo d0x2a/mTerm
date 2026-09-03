@@ -8,7 +8,7 @@ A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
 ![mTerm showing a git log in the repository, with the tab sidebar on the left](docs/session.png)
 
-> **Status:** v0.11.1 — pre-release. Daily-driveable for most workflows, but a few items from [SPEC.md](SPEC.md) are still in progress. Expect changes before 1.0.
+> **Status:** v1.0.0. Every line of the definition of done in [SPEC.md](SPEC.md) has shipped, including tmux `-CC` control mode, profiles, triggers and settings search. Two of the performance targets have been measured rather than asserted: scrollback memory is met with room to spare, throughput is well short of the figure the spec aspired to. Both numbers, and the harness that produced them, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Why
 
