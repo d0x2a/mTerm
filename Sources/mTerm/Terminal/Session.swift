@@ -57,11 +57,12 @@ final class Session {
 
     /// `cwd` overrides the profile's own directory — session restore hands
     /// back the tab's last one. Main-thread only, for `ProfileStore`.
-    init?(cols: Int, rows: Int, cwd: String? = nil, profile: Profile? = nil) {
+    init?(cols: Int, rows: Int, cwd: String? = nil, profile: Profile? = nil,
+          theme: Theme = ThemeStore.currentTheme) {
         let spec = (profile ?? ProfileStore.shared.defaultProfile).launchSpec(cwd: cwd)
         guard let pty = Pty.spawn(spec, cols: cols, rows: rows) else { return nil }
         self.pty = pty
-        self.state = TerminalState(cols: cols, rows: rows)
+        self.state = TerminalState(cols: cols, rows: rows, theme: theme)
         self.parser.sink = state
         // TerminalState fires these on the session queue; hop to the main
         // thread so UI (focus checks, posting banners) is safe.

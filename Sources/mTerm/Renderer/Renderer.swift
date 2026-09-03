@@ -234,7 +234,8 @@ final class Renderer {
                                 selection: Selection?,
                                 highlights: [HighlightBand],
                                 focused: Bool,
-                                cursorOn: Bool) {
+                                cursorOn: Bool,
+                                theme: Theme) {
         flatScratch.removeAll(keepingCapacity: true)
         glyphScratch.removeAll(keepingCapacity: true)
         glyphScratch.reserveCapacity(snapshot.cells.count / 2)
@@ -244,7 +245,6 @@ final class Renderer {
         let ascent = layout.ascent
         let origin = layout.origin
 
-        let theme = ThemeStore.currentTheme
         let cursorColor = theme.cursor
         let defaultBg = PackedColor(theme.background)
         let selectionColor = theme.selection
@@ -441,12 +441,17 @@ final class Renderer {
         }
     }
 
+    /// `theme` is the *tab's* effective theme, not the app's: one renderer is
+    /// shared by every tab in a window, and a profile may pin a palette of its
+    /// own, so the palette has to arrive with the frame rather than be read
+    /// from `ThemeStore` here.
     func render(to layer: CAMetalLayer,
                 snapshot: TerminalSnapshot,
                 selection: Selection?,
                 highlights: [HighlightBand],
                 focused: Bool,
-                cursorOn: Bool) {
+                cursorOn: Bool,
+                theme: Theme) {
         guard let drawable = layer.nextDrawable() else { return }
         let drawableSize = layer.drawableSize
 
@@ -454,7 +459,8 @@ final class Renderer {
                        selection: selection,
                        highlights: highlights,
                        focused: focused,
-                       cursorOn: cursorOn)
+                       cursorOn: cursorOn,
+                       theme: theme)
 
         growBuffer(&flatBuffer, capacity: &flatCapacity, count: flatScratch.count, type: FlatInstance.self)
         growBuffer(&glyphBuffer, capacity: &glyphCapacity, count: glyphScratch.count, type: CellInstance.self)
@@ -468,7 +474,7 @@ final class Renderer {
                                          Float(glyphAtlas.colorHeight))
         )
 
-        let bg = ThemeStore.currentTheme.background
+        let bg = theme.background
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear

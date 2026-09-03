@@ -33,7 +33,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     private let gridHUD = GridSizeHUD()
     private var gridHUDHideTimer: Timer?
 
-    init(initialCwd: String? = nil) {
+    /// `openInitialTab: false` builds an empty window for `restoreTabs` to
+    /// fill. Opening one and throwing it away would spawn a shell nobody asked
+    /// for and then drop it on the floor without terminating it.
+    init(initialCwd: String? = nil, openInitialTab: Bool = true) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1080, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -81,7 +84,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
             gridHUD.centerYAnchor.constraint(equalTo: contentContainer.centerYAnchor),
         ])
 
-        newTab(initialCwd: initialCwd)
+        if openInitialTab { newTab(initialCwd: initialCwd) }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -89,12 +92,37 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     // MARK: tab actions
 
     @discardableResult
-    func newTab(initialCwd: String? = nil) -> Tab {
-        let tab = Tab(initialCwd: initialCwd)
+    func newTab(initialCwd: String? = nil, profile: Profile? = nil) -> Tab {
+        let tab = Tab(initialCwd: initialCwd, profile: profile)
         tab.terminalView.delegate = self
         tabs.append(tab)
         selectTab(tab.id)
         return tab
+    }
+
+    /// Fills a window built with `openInitialTab: false` from the tab list the
+    /// previous run saved. Restores the *structure* only — directories and
+    /// profiles — with fresh shells in each; reviving process state is tmux's
+    /// job, not ours.
+    ///
+    /// A tab whose profile has since been deleted comes back on the default
+    /// profile rather than not at all: losing a profile shouldn't cost the
+    /// user the tab and its directory too.
+    func restoreTabs(_ saved: [SavedTab]) {
+        guard tabs.isEmpty else { return }
+        for entry in saved {
+            let profile = entry.profileId
+                .flatMap { UUID(uuidString: $0) }
+                .flatMap { ProfileStore.shared.profile(id: $0) }
+            newTab(initialCwd: entry.cwd, profile: profile)
+        }
+        // The window has to end up with something in it: a state.json listing
+        // only tabs whose directories are gone would otherwise leave an empty
+        // window with no way to get a shell back except ⌘T.
+        if tabs.isEmpty { newTab() }
+        // Open on the first tab, the way the list reads, rather than on
+        // whichever one happened to be added last.
+        if let first = tabs.first { selectTab(first.id) }
     }
 
     func selectTab(_ id: UUID) {

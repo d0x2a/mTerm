@@ -1,6 +1,38 @@
 import AppKit
 
 enum MainMenu {
+    /// The `New Tab with Profile` submenu, held onto so `rebuildProfilesMenu`
+    /// can repopulate it when the profile list changes.
+    ///
+    /// Rebuilt eagerly rather than from `menuNeedsUpdate:` because ⌘⌥1–9 have
+    /// to work without the menu ever being opened, and AppKit only searches
+    /// items that already exist when it matches a key equivalent.
+    private static let profilesMenu = NSMenu(title: "New Tab with Profile")
+
+    /// Repopulates the profile submenu from `ProfileStore`. Call after any
+    /// change to the profile list.
+    static func rebuildProfilesMenu() {
+        profilesMenu.removeAllItems()
+        let profiles = ProfileStore.shared.profiles
+        let defaultId = ProfileStore.shared.defaultProfile.id
+        for (i, profile) in profiles.enumerated() {
+            let item = profilesMenu.addItem(
+                withTitle: profile.name,
+                action: #selector(AppDelegate.openNewTabWithProfile(_:)),
+                // Only the first nine get a shortcut; the rest are menu-only.
+                keyEquivalent: i < 9 ? "\(i + 1)" : ""
+            )
+            item.keyEquivalentModifierMask = [.command, .option]
+            // The id, not the index: reordering the list would otherwise
+            // repoint a shortcut at a different profile without the user
+            // touching it.
+            item.representedObject = profile.id
+            // A tick marks the one ⌘T uses, which is the only way to tell
+            // from the menu which of several profiles is the default.
+            item.state = profile.id == defaultId ? .on : .off
+        }
+    }
+
     static func build() -> NSMenu {
         let mainMenu = NSMenu()
         let appName = ProcessInfo.processInfo.processName
@@ -40,6 +72,14 @@ enum MainMenu {
         fileMenu.addItem(withTitle: "New Tab",
                          action: #selector(AppDelegate.openNewTab(_:)),
                          keyEquivalent: "t")
+        // A submenu rather than turning "New Tab" itself into one: an item
+        // with a submenu can't carry a key equivalent, and ⌘T has to keep
+        // working without a trip through the menu.
+        let profilesItem = fileMenu.addItem(withTitle: "New Tab with Profile",
+                                            action: nil, keyEquivalent: "")
+        profilesItem.submenu = profilesMenu
+        rebuildProfilesMenu()
+        fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Close Tab",
                          action: #selector(AppDelegate.closeActiveTab(_:)),
                          keyEquivalent: "w")

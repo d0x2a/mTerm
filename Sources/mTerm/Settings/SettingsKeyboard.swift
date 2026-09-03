@@ -9,6 +9,10 @@ enum SettingsField: Hashable {
     // Appearance
     case mode, lightTheme, darkTheme, importTheme
     case fontFamily, fontSize, strokeWeight, lineHeight, blinkCursor
+    // Profiles
+    case profileList, profileAdd, profileRemove, profileMoveUp, profileMoveDown
+    case profileName, profileCommand, profileDirectory, profileChooseDirectory
+    case profileTheme, profileDefault, profileEnvAdd
     // General
     case warnOnClose
     // Notifications

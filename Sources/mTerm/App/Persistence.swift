@@ -2,6 +2,25 @@ import Foundation
 
 struct SavedTab: Codable {
     let cwd: String?
+    /// Profile the tab was opened with, as a uuid string. Absent for a tab
+    /// opened with plain ⌘T, and for every tab written before profiles
+    /// existed — both of which restore onto the current default.
+    let profileId: String?
+
+    init(cwd: String?, profileId: String? = nil) {
+        self.cwd = cwd
+        self.profileId = profileId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case cwd, profileId
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+        self.profileId = try c.decodeIfPresent(String.self, forKey: .profileId)
+    }
 }
 
 struct SavedRect: Codable {

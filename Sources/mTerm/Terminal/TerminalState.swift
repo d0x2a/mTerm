@@ -146,10 +146,24 @@ enum MouseEncoding {
 }
 
 final class TerminalState: ParserSink {
-    // Theme-derived helpers — read at the call site so future writes always
-    // use the current theme. Existing cells keep their previously-baked RGB.
-    static var defaultFg: PackedColor { PackedColor(ThemeStore.currentTheme.foreground) }
-    static var defaultBg: PackedColor { PackedColor(ThemeStore.currentTheme.background) }
+    /// Palette this buffer paints its default-coloured cells in, and answers
+    /// OSC 10/11/4 colour queries from.
+    ///
+    /// Per buffer rather than read from `ThemeStore` at each call site,
+    /// because a profile can pin a theme of its own: two tabs in one window
+    /// may be painting in different palettes at the same time. Kept in step
+    /// with the tab's effective theme by `applyThemeChange`, which also
+    /// remaps every cell already on screen.
+    private(set) var theme: Theme
+    /// `theme`'s fg/bg, packed once. A blank cell is made often enough — every
+    /// erase, every scrolled-in row — that repacking two colours each time
+    /// would land in the parse hot path.
+    private var defaultFg: PackedColor
+    private var defaultBg: PackedColor
+    /// A blank in this buffer's palette. Replaces a bare `Cell()`, which
+    /// reaches for the *app's* theme and would paint a profile-themed tab's
+    /// blanks in the wrong colours.
+    private var blankCell: Cell { Cell(fg: defaultFg, bg: defaultBg) }
 
     private(set) var cols: Int
     private(set) var rows: Int
@@ -341,19 +355,23 @@ final class TerminalState: ParserSink {
     /// the tabs opened after it rather than reallocating the history of every
     /// live one.
     init(cols: Int, rows: Int,
-         scrollback: Int = ThemeStore.shared.settings.scrollbackLines) {
+         scrollback: Int = ThemeStore.shared.settings.scrollbackLines,
+         theme: Theme = ThemeStore.currentTheme) {
         self.cols = max(1, cols)
         self.rows = max(1, rows)
         self.maxScrollback = max(0, scrollback)
         self.scrollBottom = self.rows - 1
-        let theme = ThemeStore.currentTheme
+        self.theme = theme
+        self.defaultFg = PackedColor(theme.foreground)
+        self.defaultBg = PackedColor(theme.background)
         self.currentFg = PackedColor(theme.foreground)
         self.currentBg = PackedColor(theme.background)
         self.savedFg = PackedColor(theme.foreground)
         self.savedBg = PackedColor(theme.background)
         self.stashedFg = PackedColor(theme.foreground)
         self.stashedBg = PackedColor(theme.background)
-        self.cells = Array(repeating: Cell(), count: self.cols * self.rows)
+        self.cells = Array(repeating: Cell(fg: self.defaultFg, bg: self.defaultBg),
+                           count: self.cols * self.rows)
         self.rowWrapped = Array(repeating: false, count: self.rows)
         self.tabStops = Self.defaultTabStops(cols: self.cols)
     }
@@ -372,7 +390,8 @@ final class TerminalState: ParserSink {
             // content the same way. The primary buffer stashed behind it does
             // reflow, so leaving vim lands on a correctly-wrapped shell.
             cells = Self.resizedGrid(cells, oldCols: cols, oldRows: rows,
-                                     newCols: newCols, newRows: newRows)
+                                     newCols: newCols, newRows: newRows,
+                                     blank: blankCell)
             // The flags have to track `rows` or the next wrap indexes past the
             // end of the array. The alt screen has no continuations worth
             // keeping — the app repaints it — so they all start clear.
@@ -452,7 +471,7 @@ final class TerminalState: ParserSink {
     /// of them ring-aware.
     private func normalizeRowOffset() {
         guard rowOffset != 0 else { return }
-        var rebuilt = [Cell](repeating: Cell(), count: cells.count)
+        var rebuilt = [Cell](repeating: blankCell, count: cells.count)
         rebuilt.withUnsafeMutableBufferPointer { dst in
             cells.withUnsafeBufferPointer { src in
                 for r in 0..<rows {
@@ -510,7 +529,7 @@ final class TerminalState: ParserSink {
         let scrollbackRowsShown = min(offset, rows)
         // Scrollback rows can be shorter than the current width; pad with one
         // blank rather than constructing a themed Cell per missing column.
-        let padding = Cell()
+        let padding = blankCell
         for i in 0..<scrollbackRowsShown {
             let row = scrollbackRow(firstScrollbackIdx + i)
             for c in 0..<cols {
@@ -611,7 +630,7 @@ final class TerminalState: ParserSink {
         // next row whole, leaving the last column blank.
         if width == 2 && cursorCol == cols - 1 {
             guard autoWrap else { return }
-            cells[rowBase(cursorRow) + cursorCol] = Cell()
+            cells[rowBase(cursorRow) + cursorCol] = blankCell
             rowWrapped[ringRow(cursorRow)] = true
             cursorCol = 0
             advanceRow()
@@ -650,9 +669,9 @@ final class TerminalState: ParserSink {
         let idx = rowBase(cursorRow) + col
         switch cells[idx].width {
         case 0:                                     // trailing half: head is left
-            if col > 0 { cells[idx - 1] = Cell() }
+            if col > 0 { cells[idx - 1] = blankCell }
         case 2:                                     // leading half: tail is right
-            if col + 1 < cols { cells[idx + 1] = Cell() }
+            if col + 1 < cols { cells[idx + 1] = blankCell }
         default:
             break
         }
@@ -894,7 +913,7 @@ final class TerminalState: ParserSink {
     /// We only answer queries; requests to *change* a color are ignored, since
     /// the theme owns those.
     private func reportDynamicColors(from code: Int, payload: String, terminator: UInt8) {
-        let theme = ThemeStore.currentTheme
+        let theme = self.theme
         let args = payload.split(separator: ";", omittingEmptySubsequences: false)
         for (offset, arg) in args.enumerated() {
             guard arg == "?" else { continue }
@@ -916,7 +935,7 @@ final class TerminalState: ParserSink {
         var i = 0
         while i + 1 < args.count {
             if args[i + 1] == "?", let idx = Int(args[i]), (0...255).contains(idx) {
-                let color = AnsiPalette.indexed256(idx, palette: ThemeStore.currentTheme.ansi)
+                let color = AnsiPalette.indexed256(idx, palette: theme.ansi)
                 reply(oscReply("4;\(idx);\(xtermColorSpec(color))", terminator: terminator))
             }
             i += 2
@@ -1129,6 +1148,9 @@ final class TerminalState: ParserSink {
     /// background, or ANSI palette to the new theme's equivalents. 24-bit and
     /// 256-color-cube cells (explicit user choices) are left alone.
     func applyThemeChange(from old: Theme, to new: Theme) {
+        theme = new
+        defaultFg = PackedColor(new.foreground)
+        defaultBg = PackedColor(new.background)
         // Single map shared by fg and bg lookups. Any palette color can land
         // in either slot — when a cell is printed with inverse SGR (\e[7m)
         // we bake the swap at parse time, so cell.bg becomes the old fg and
@@ -1490,12 +1512,12 @@ final class TerminalState: ParserSink {
         stashedBg = currentBg
         stashedAttrs = currentAttrs
         stashedLink = currentLink
-        cells = Array(repeating: Cell(), count: cols * rows)
+        cells = Array(repeating: blankCell, count: cols * rows)
         rowWrapped = Array(repeating: false, count: rows)
         rowOffset = 0
         cursorCol = 0
         cursorRow = 0
-        let theme = ThemeStore.currentTheme
+        let theme = self.theme
         currentFg = PackedColor(theme.foreground)
         currentBg = PackedColor(theme.background)
         currentAttrs = []
@@ -1524,12 +1546,12 @@ final class TerminalState: ParserSink {
     }
 
     private func fullReset() {
-        cells = Array(repeating: Cell(), count: cols * rows)
+        cells = Array(repeating: blankCell, count: cols * rows)
         rowWrapped = Array(repeating: false, count: rows)
         rowOffset = 0
         cursorCol = 0
         cursorRow = 0
-        let theme = ThemeStore.currentTheme
+        let theme = self.theme
         currentFg = PackedColor(theme.foreground)
         currentBg = PackedColor(theme.background)
         currentAttrs = []
@@ -1659,10 +1681,14 @@ final class TerminalState: ParserSink {
         // do. Blanking to the theme background left those bands unpainted
         // except for whatever cells were written explicitly.
         // Foreground stays the default: a blank has no glyph, and carrying
-        // the current one would tint it if the cell were later inverted.
-        let blankCell = Cell(bg: currentBg)
+        // the current one would tint it if the cell were later inverted. It is
+        // this buffer's default, not the app's — leaving `fg` out here would
+        // send `Cell.init` to `ThemeStore.currentTheme` and paint a
+        // profile-themed tab's erased cells from the wrong palette (and take
+        // the theme lock on every erase and every scrolled-in row).
+        let erased = Cell(fg: defaultFg, bg: currentBg)
         cells.withUnsafeMutableBufferPointer { buf in
-            (buf.baseAddress! + index).update(repeating: blankCell, count: count)
+            (buf.baseAddress! + index).update(repeating: erased, count: count)
         }
     }
 
@@ -1864,9 +1890,12 @@ final class TerminalState: ParserSink {
     /// repaint — and the alt screen never feeds history at all.
     private func pushScreenToScrollback() {
         guard !usingAlt else { return }
-        // Built once: `Cell` reaches for the theme (under a lock) whenever a
-        // colour is left out, and this is on the repaint path.
-        let blank = Cell(bg: currentBg)
+        // Built once, and from the same two colours `blankCells` writes: this
+        // is compared field-by-field against real cells, so a template whose
+        // `fg` came from the app's theme rather than this buffer's would never
+        // match in a profile-themed tab, and every repaint would file a
+        // screenful of blanks into history.
+        let blank = Cell(fg: defaultFg, bg: currentBg)
         var last = -1
         for r in 0..<rows where !rowIsBlank(r, blank: blank) { last = r }
         guard last >= 0 else { return }
@@ -1961,7 +1990,7 @@ final class TerminalState: ParserSink {
     // MARK: SGR
 
     private func applySGR(_ params: [Int]) {
-        let theme = ThemeStore.currentTheme
+        let theme = self.theme
         let palette = theme.ansi
         var i = 0
         while i < params.count {
@@ -2037,7 +2066,7 @@ final class TerminalState: ParserSink {
                                newCols: Int, newRows: Int)
         -> (cells: [Cell], wrapped: [Bool], cursorCol: Int, cursorRow: Int) {
 
-        let blank = Cell()
+        let blank = blankCell
 
         // 1. Every primary row that exists, oldest first.
         struct SourceRow { let cells: [Cell]; let wrapped: Bool; let absolute: Int }
@@ -2212,9 +2241,8 @@ final class TerminalState: ParserSink {
             if copy < newCols, let last = row.last,
                last.scalar == blank.scalar, last.width == blank.width,
                last.bg != blank.bg || last.attrs != blank.attrs {
-                var fill = Cell(bg: last.bg)
+                var fill = Cell(fg: last.fg, bg: last.bg)
                 fill.attrs = last.attrs
-                fill.fg = last.fg
                 for c in copy..<newCols { newCells[r * newCols + c] = fill }
             }
             newWrapped[r] = rebuilt[k].wrapped
@@ -2276,8 +2304,9 @@ final class TerminalState: ParserSink {
 
     private static func resizedGrid(_ src: [Cell],
                                     oldCols: Int, oldRows: Int,
-                                    newCols: Int, newRows: Int) -> [Cell] {
-        var dst = Array(repeating: Cell(), count: newCols * newRows)
+                                    newCols: Int, newRows: Int,
+                                    blank: Cell) -> [Cell] {
+        var dst = Array(repeating: blank, count: newCols * newRows)
         let copyCols = min(oldCols, newCols)
         let copyRows = min(oldRows, newRows)
         for r in 0..<copyRows {

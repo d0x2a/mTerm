@@ -33,10 +33,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = MainMenu.build()
         installTabCycleShortcut()
 
-        let controller = MainWindowController()
+        let saved = Persistence.load()
+        // An empty window when there are tabs to restore — see `restoreTabs`.
+        let savedTabs = saved?.tabs ?? []
+        let controller = MainWindowController(openInitialTab: savedTabs.isEmpty)
         initialController = controller
 
-        let saved = Persistence.load()
         if let window = controller.window, let rect = saved?.windowFrame {
             window.setFrame(NSRect(x: rect.x, y: rect.y,
                                    width: rect.width, height: rect.height),
@@ -44,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             controller.window?.center()
         }
+
+        // Before the window is shown, so it opens with its tabs already in
+        // place rather than visibly filling up.
+        controller.restoreTabs(savedTabs)
 
         controller.showWindow(nil)
 
@@ -61,7 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         let controller = activeController()
         let tabs = controller?.tabs.map { tab -> SavedTab in
-            SavedTab(cwd: tab.terminalView.currentDirectory)
+            SavedTab(cwd: tab.terminalView.currentDirectory,
+                     profileId: tab.profileId?.uuidString)
         } ?? []
         let window = controller?.window
         let fullScreen = window?.styleMask.contains(.fullScreen) ?? false
@@ -139,6 +146,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.newTab(initialCwd: nil)
     }
 
+    /// `File > New Tab > <profile>` and ⌘⌥1–9. The profile is carried on the
+    /// menu item's `representedObject` rather than its tag, so reordering the
+    /// list can't silently repoint a shortcut at a different profile.
+    @objc func openNewTabWithProfile(_ sender: Any?) {
+        guard let controller = activeController() else { return }
+        guard let item = sender as? NSMenuItem,
+              let id = item.representedObject as? UUID,
+              let profile = ProfileStore.shared.profile(id: id)
+        else {
+            controller.newTab(initialCwd: nil)
+            return
+        }
+        controller.newTab(initialCwd: nil, profile: profile)
+    }
+
     @objc func closeActiveTab(_ sender: Any?) {
         // If an auxiliary window (e.g. Settings) is key, ⌘W closes that window
         // rather than a terminal tab in the background main window.
@@ -173,6 +195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return (controller?.tabCount ?? 0) > 0
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)):
             return (controller?.tabCount ?? 0) > 1
+        case #selector(openNewTabWithProfile(_:)):
+            return controller != nil
         case #selector(selectTabByNumber(_:)):
             let count = controller?.tabCount ?? 0
             let n = menuItem.tag

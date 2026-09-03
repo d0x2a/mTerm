@@ -39,6 +39,9 @@ final class TerminalView: NSView, CALayerDelegate {
     /// Optional CWD passed in before the session is created. Used by ⌘T (inherit
     /// from the active tab) and by session restore on launch.
     var initialCwd: String?
+    /// Profile this tab was opened with. nil follows whatever `ProfileStore`
+    /// calls default at spawn time, which is what ⌘T has always done.
+    var profile: Profile?
 
     /// The session's last-known working directory (from OSC 7). nil if the shell
     /// hasn't emitted OSC 7 yet.
@@ -155,6 +158,29 @@ final class TerminalView: NSView, CALayerDelegate {
     private var lastMouseWindowPoint: NSPoint? = nil
     private var lastAppliedTheme: Theme = ThemeStore.currentTheme
 
+    /// The palette this tab paints in: its profile's pinned theme when it has
+    /// one, otherwise whatever Appearance is currently showing. A pinned theme
+    /// is deliberately immune to the light/dark switch — that is what pinning
+    /// one means.
+    ///
+    /// Resolved through `ProfileStore` rather than the `profile` copy this view
+    /// was handed, so re-pointing a profile's theme in Settings reaches tabs
+    /// that are already open. The rest of the profile is deliberately *not*
+    /// re-read: the command, directory and environment were spent when the
+    /// shell was spawned, and a running tab keeps the shell it started with.
+    ///
+    /// Called once a tick from `reconcileThemeIfChanged`, which caches the
+    /// result in `lastAppliedTheme` — the frame path reads that instead, since
+    /// `allThemes` builds an array every time it is asked.
+    var effectiveTheme: Theme {
+        guard let id = profile?.id,
+              let live = ProfileStore.shared.profile(id: id),
+              let themeId = live.themeId,
+              let pinned = ThemeStore.shared.allThemes.first(where: { $0.id == themeId })
+        else { return ThemeStore.currentTheme }
+        return pinned
+    }
+
     override var wantsUpdateLayer: Bool { true }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -187,7 +213,7 @@ final class TerminalView: NSView, CALayerDelegate {
     /// Called every tick. Detects theme changes and dispatches a cell remap so
     /// already-printed text picks up the new palette.
     private func reconcileThemeIfChanged() {
-        let new = ThemeStore.currentTheme
+        let new = effectiveTheme
         let old = lastAppliedTheme
         guard old != new else { return }
         invalidate()
@@ -894,7 +920,7 @@ final class TerminalView: NSView, CALayerDelegate {
                                                         viewportRows: lastSnapshotRows)
         else { return }
         scrollIndicator.frame = frame
-        let fg = ThemeStore.currentTheme.foreground
+        let fg = lastAppliedTheme.foreground
         scrollIndicator.layer?.backgroundColor = NSColor(srgbRed: CGFloat(fg.x),
                                                          green: CGFloat(fg.y),
                                                          blue: CGFloat(fg.z),
@@ -1193,7 +1219,13 @@ final class TerminalView: NSView, CALayerDelegate {
 
     private func ensureSession() {
         guard session == nil, let (cols, rows) = gridDimensions() else { return }
-        let s = Session(cols: cols, rows: rows, cwd: initialCwd)
+        // Recorded before the session so the first `reconcileThemeIfChanged`
+        // agrees with the palette the buffer was built in. Left at the app's
+        // theme, a profile-themed tab would open by remapping a buffer that
+        // was already in the right colours.
+        lastAppliedTheme = effectiveTheme
+        let s = Session(cols: cols, rows: rows, cwd: initialCwd, profile: profile,
+                        theme: lastAppliedTheme)
         s?.onOutput = { [weak self] in
             self?.sessionDidOutput()
         }
@@ -1332,7 +1364,8 @@ final class TerminalView: NSView, CALayerDelegate {
                         selection: viewportSelection(snapshot: snapshot),
                         highlights: composedHighlights(snapshot: snapshot),
                         focused: focused,
-                        cursorOn: cursorBlinkOn())
+                        cursorOn: cursorBlinkOn(),
+                        theme: lastAppliedTheme)
     }
 
     private func composedHighlights(snapshot: TerminalSnapshot) -> [HighlightBand] {
@@ -1367,7 +1400,7 @@ final class TerminalView: NSView, CALayerDelegate {
             // its rows rather than only the one being pointed at — the extent
             // of the marking is the extent of what opens.
             if let hovered = hoveredTriggerMatch(), hovered.trigger.clickAction != nil {
-                let accent = ThemeStore.currentTheme.linkAccent
+                let accent = lastAppliedTheme.linkAccent
                 for m in currentTriggerMatches where m.id == hovered.id {
                     // Text and rule in the same colour, so the link reads as
                     // one object rather than as text with something drawn

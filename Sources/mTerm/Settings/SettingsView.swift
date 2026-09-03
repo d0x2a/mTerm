@@ -4,13 +4,14 @@ import SwiftUI
 /// the selected pane on the right.
 struct SettingsView: View {
     private enum Category: String, CaseIterable, Identifiable {
-        case appearance, general, notifications
+        case appearance, profiles, general, notifications
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .appearance:    return "Appearance"
+            case .profiles:      return "Profiles"
             case .general:       return "General"
             case .notifications: return "Notifications"
             }
@@ -19,6 +20,7 @@ struct SettingsView: View {
         var systemImage: String {
             switch self {
             case .appearance:    return "paintbrush"
+            case .profiles:      return "person.crop.rectangle.stack"
             case .general:       return "gearshape"
             case .notifications: return "bell"
             }
@@ -86,6 +88,8 @@ struct SettingsView: View {
         switch selection ?? .appearance {
         case .appearance:
             fields = AppearancePane.fieldOrder
+        case .profiles:
+            fields = ProfilesPane.fieldOrder
         case .general:
             fields = GeneralPane.fieldOrder
         case .notifications:
@@ -99,6 +103,7 @@ struct SettingsView: View {
     private func detail(for category: Category) -> some View {
         switch category {
         case .appearance:    AppearancePane(focus: $focus)
+        case .profiles:      ProfilesPane(focus: $focus)
         case .general:       GeneralPane(focus: $focus)
         case .notifications: NotificationsPane(focus: $focus)
         }
