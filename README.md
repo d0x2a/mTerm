@@ -58,13 +58,13 @@ swift run -c release mTerm
 - ⌘-click opens links: URLs (with or without a scheme — `code.d0x2a.com` and `localhost:3000/health` both count) go to the browser, file paths are revealed in Finder. Links aren't drawn differently from the text around them until you point at one: with ⌘ held, the link under the pointer takes the theme's accent colour with an underline to match, and the cursor becomes a hand, one link at a time rather than the whole screen at once. Only paths that exist on disk are offered, so `and/or` stays inert, a `file.swift:42` from compiler output links whole, and a URL that wraps across rows is treated as one address rather than two fragments.
 - Close-confirmation when a foreground process is running (`vim`, `ssh`, etc.) — togglable in Settings.
 - Font family, size, stroke weight, and line spacing (1.0×–2.0×, default 1.15×) are all adjustable live in Settings.
+- Triggers: a regex plus what to do with what it matches — highlight it, recolour it, underline it, or make ⌘-click open it as a URL, reveal it in Finder, or run a command with `$1` as the match. Edited in Settings with an inline tester that runs the real regex, and stored in `triggers.json`. Your rules are tried before the two built-in ones (URLs and file paths), which can be switched off but not edited — their patterns are maintained in mTerm and improve between releases.
 - Scrollback depth is configurable in Settings (1k–100k lines, 10k default).
 - Profiles: a named command, starting directory, environment and optional pinned theme, edited in Settings and stored one JSON file each under `profiles/` so a profile can be shared or checked into a repo. Open one from `File > New Tab with Profile` or ⌘⌥1–9; ⌘T uses whichever is marked default. A profile that pins a theme keeps it whatever the system appearance does, so a production-ssh tab can look different from the rest.
-- Settings window organized into Appearance / General / Notifications panes.
+- Settings window organized into Appearance / Profiles / Triggers / General / Notifications panes.
 
 ## Not yet (tracked for v1)
 
-- User-defined triggers: they're the two built in (URLs and file paths) until there's a store and an editor.
 - tmux `-CC` control mode.
 - Settings search.
 
@@ -91,6 +91,7 @@ mTerm stores everything under `~/Library/Application Support/mTerm/`:
 - `settings.json` — appearance mode, themes, font, close-warning preference.
 - `state.json` — restored on next launch (tabs, their directories and profiles, window frame, full-screen state).
 - `profiles/*.json` — one file per profile (name, command, directory, environment).
+- `triggers.json` — your own trigger rules, plus any built-in ones you've switched off.
 
 There's no config file in v1; everything is editable through the Settings window (⌘,).
 

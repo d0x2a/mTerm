@@ -244,13 +244,12 @@ so nothing is blocked from being ticked by a part of it that hasn't shipped.
 - [x] Shell integration for zsh (OSC 133), jump-to-prompt
 - [x] Shell integration for bash + fish
 - [x] Triggers: highlighting, clickable URLs and paths, OSC 8 hyperlinks
-- [ ] Triggers: persistence and an editor UI — the `runCommand` action runs,
-      but the only triggers that exist are the two built in
+- [x] Triggers: persistence and an editor UI, incl. the `runCommand` action
 - [ ] tmux `-CC` integration mode
 - [x] Profiles: model, store on disk, per-profile command / cwd / env
 - [x] Profiles: Settings editor, New Tab menu, theme override
 - [x] Themes + macOS appearance switching
-- [x] Settings window (Appearance / General / Notifications)
+- [x] Settings window (Appearance / Profiles / Triggers / General / Notifications)
 - [ ] Settings search
 - [x] Session restore (tabs, their directories and their profiles)
 - [x] Signed + notarized DMG
