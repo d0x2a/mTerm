@@ -163,6 +163,71 @@ do {
           "got \"\(row(s.snapshot(), 0))\"")
 }
 
+section("triggers")
+do {
+    // The store is not touched: it writes to the real triggers.json. What is
+    // worth pinning is the evaluator's contract, and that takes a list.
+    check("built-in ids are fixed, so \"switched off\" survives a relaunch",
+          Trigger.builtins.map(\.id) == [Trigger.urlID, Trigger.pathID])
+    check("and the builtins know themselves as built in",
+          Trigger.builtins.allSatisfy(\.isBuiltin))
+    check("a user trigger does not", !Trigger(name: "x", pattern: "x",
+                                              color: SIMD4(1, 1, 1, 1)).isBuiltin)
+
+    check("a broken pattern is reported, not swallowed",
+          TriggerStore.patternError("[unclosed") != nil)
+    check("a good one isn't", TriggerStore.patternError(#"\berror\b"# ) == nil)
+    check("and an empty one is not an error — it is a rule being typed",
+          TriggerStore.patternError("") == nil)
+
+    // `runCommand` carries a template, so it has to survive the round trip to
+    // disk that the other two cases don't exercise.
+    let t = Trigger(name: "Open in Preview", pattern: #"\S+\.png"#,
+                    color: SIMD4(1, 0.5, 0, 0.4), style: .background,
+                    clickAction: .runCommand("open -a Preview $1"))
+    let back = try! JSONDecoder().decode(Trigger.self, from: JSONEncoder().encode(t))
+    check("a trigger round-trips through JSON", back == t)
+    if case .runCommand(let cmd) = back.clickAction {
+        check("including its command template", cmd == "open -a Preview $1")
+    } else {
+        check("including its command template", false, "action decoded as \(String(describing: back.clickAction))")
+    }
+
+    let (state, feed) = buffer(cols: 40, rows: 3)
+    feed("see https://example.com/x for details")
+    let snap = state.snapshot()
+
+    let builtinsOnly = TriggerEvaluator(triggers: Trigger.builtins)
+    let urlMatch = builtinsOnly.evaluate(snapshot: snap).first { $0.trigger.id == Trigger.urlID }
+    check("the URL rule finds a URL", urlMatch?.text == "https://example.com/x",
+          "got \(urlMatch?.text ?? "nothing")")
+
+    // Ordering is the whole contract for user rules: TriggerStore.active puts
+    // them first precisely so a narrower rule can take a span off a builtin.
+    let mine = Trigger(name: "Example host", pattern: #"https://example\.com/\S*"#,
+                       color: SIMD4(1, 0, 0, 1), style: .background)
+    let userFirst = TriggerEvaluator(triggers: [mine] + Trigger.builtins)
+    let claimed = userFirst.evaluate(snapshot: snap).first { $0.text.contains("example.com") }
+    check("a user rule listed first claims the span off a builtin",
+          claimed?.trigger.id == mine.id,
+          "claimed by \(claimed?.trigger.name ?? "nothing")")
+
+    let builtinFirst = TriggerEvaluator(triggers: Trigger.builtins + [mine])
+    let claimed2 = builtinFirst.evaluate(snapshot: snap).first { $0.text.contains("example.com") }
+    check("and listed last it does not", claimed2?.trigger.id == Trigger.urlID)
+
+    let off = TriggerEvaluator(triggers: [Trigger(name: "Off", pattern: "details",
+                                                  color: SIMD4(1, 1, 1, 1),
+                                                  style: .background, enabled: false)])
+    check("a disabled rule is never compiled", off.evaluate(snapshot: snap).isEmpty)
+
+    let broken = TriggerEvaluator(triggers: [Trigger(name: "Bad", pattern: "[unclosed",
+                                                     color: SIMD4(1, 1, 1, 1))]
+                                  + Trigger.builtins)
+    check("a rule that won't compile is skipped without taking the others down",
+          broken.evaluate(snapshot: snap).contains { $0.trigger.id == Trigger.urlID })
+}
+
 section("profiles")
 do {
     // Decoding only — writing would go to the real profiles directory.

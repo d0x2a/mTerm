@@ -277,6 +277,47 @@ do {
     print("  budget @ 120 Hz      " + rpad("8333.0 µs", 10))
 }
 
+header("Trigger cost as rules are added")
+do {
+    // The question a user has after opening the Triggers pane: how many can I
+    // add before it costs me a frame? Each enabled pattern is tried against
+    // every logical line on screen, every frame the screen changes.
+    let state = TerminalState(cols: benchCols, rows: benchRows)
+    let parser = Parser()
+    parser.sink = state
+    let screen = Array("""
+    $ swift build -c release 2>&1 | tee /Users/dev/src/mTerm/build.log
+    warning: /Users/dev/src/mTerm/Sources/mTerm/Terminal/TerminalState.swift:118:9: unused
+    see https://github.com/d0x2a/mTerm/issues/42 and docs/BENCHMARKS.md for context
+    fetching https://code.d0x2a.com/pkg/index.json (localhost:3000/health mirrors it)
+
+    """.utf8)
+    for _ in 0..<(benchRows / 5) { screen.withUnsafeBufferPointer { parser.feed(bytes: $0) } }
+    let snap = state.snapshot()
+
+    // Representative of what people actually write: word-ish rules with an
+    // alternation or two, not pathological backtracking.
+    func extras(_ n: Int) -> [Trigger] {
+        (0..<n).map { i in
+            Trigger(name: "rule \(i)",
+                    pattern: #"\b(?:ERROR|WARN|FATAL|TODO|FIXME)\#(i)?\b"#,
+                    color: SIMD4(1, 0.5, 0, 0.4),
+                    style: .background)
+        }
+    }
+
+    for n in [0, 3, 8, 18] {
+        let evaluator = TriggerEvaluator(triggers: extras(n) + Trigger.builtins)
+        let seconds = measure(reps: 21) {
+            blackhole &+= evaluator.evaluate(snapshot: snap).count
+        }
+        let share = seconds / 0.008333 * 100
+        print("  " + rpad("\(n + 2)", 3) + " rules  "
+              + rpad(String(format: "%.0f µs", seconds * 1e6), 10)
+              + String(format: "   %.1f%% of a 120 Hz frame", share))
+    }
+}
+
 header("Scrollback memory at \(benchCols) cols")
 print("  sizeof(Cell) \(MemoryLayout<Cell>.size) bytes, stride \(MemoryLayout<Cell>.stride)")
 for lines in [10_000, 50_000, 100_000] {

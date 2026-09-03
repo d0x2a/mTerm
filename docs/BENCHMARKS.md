@@ -73,6 +73,23 @@ of magnitude, and it runs every frame over the whole viewport — 63 matches on
 the test screen, which is a dense one. It fits, with room, but it is the thing
 to watch if the viewport or the trigger list grows.
 
+Adding your own trigger rules costs less than the two shipped ones do:
+
+| Enabled rules | Per frame | Share of a 120 Hz frame |
+|---|---|---|
+| 2 (the builtins alone) | 824 µs | 9.9% |
+| 5 | 982 µs | 11.8% |
+| 10 | 1160 µs | 13.9% |
+| 20 | 1697 µs | 20.4% |
+
+That is about 48 µs per additional rule, measured with word-ish patterns of
+the shape people actually write (`\b(?:ERROR|WARN|FATAL)\b`) rather than
+anything pathological. The interesting part is the first row: the two builtins
+cost more on their own than eighteen ordinary rules added on top of them. The
+URL pattern is a long alternation over a curated TLD list and the path pattern
+is deliberately loose, so both do real work on every line. Someone can add a
+couple of dozen rules of their own before it shows.
+
 Note that SPEC.md states the trigger budget as "≤ 1 ms per 1 KB of output".
 That unit doesn't describe how triggers actually run: they are not evaluated
 per byte of output but per frame over the visible grid, so a screen that never
