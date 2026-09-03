@@ -13,6 +13,7 @@ swiftc -framework SwiftUI -o "$out" \
     scripts/statecheck/main.swift \
     Sources/mTerm/Terminal/TerminalState.swift \
     Sources/mTerm/Terminal/Parser.swift \
+    Sources/mTerm/Tmux/TmuxControlClient.swift \
     Sources/mTerm/Triggers/Trigger.swift \
     Sources/mTerm/Triggers/TriggerEvaluator.swift \
     Sources/mTerm/Triggers/TriggerStore.swift \

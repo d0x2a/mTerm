@@ -253,6 +253,147 @@ do {
           "\(login.argv)")
 }
 
+section("device control strings")
+do {
+    // ESC P used to fall through as a plain ESC dispatch, so the payload
+    // printed as text: `tmux -CC` put a literal "1000p" on the screen.
+    let (state, feed) = buffer(cols: 20, rows: 3)
+    feed("\u{1b}P1000p%begin 1 2 3\r\n\u{1b}\\after")
+    check("a DCS payload is not printed as text",
+          row(state.snapshot(), 0) == "after",
+          "row 0 is \"\(row(state.snapshot(), 0))\"")
+
+    final class Recorder: ParserSink {
+        var text = ""
+        var starts: [(params: [Int], final: UInt8)] = []
+        var payload: [UInt8] = []
+        var ends = 0
+        func parserPrint(_ scalar: Unicode.Scalar) { text.unicodeScalars.append(scalar) }
+        func parserExecute(_ control: UInt8) {}
+        func parserCSI(_ p: [Int], marker: UInt8?, intermediates: [UInt8], final: UInt8) {}
+        func parserOSC(_ data: [UInt8], terminator: UInt8) {}
+        func parserESC(_ final: UInt8, intermediates: [UInt8]) {}
+        func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8) {
+            starts.append((params, final))
+        }
+        func parserDCSPut(_ bytes: ArraySlice<UInt8>) { payload.append(contentsOf: bytes) }
+        func parserDCSEnd() { ends += 1 }
+    }
+
+    let recorder = Recorder()
+    let parser = Parser()
+    parser.sink = recorder
+    func send(_ s: String) {
+        Array(s.utf8).withUnsafeBufferPointer { parser.feed(bytes: $0) }
+    }
+    send("\u{1b}P1000p")
+    check("the introducer reports its parameter and final byte",
+          recorder.starts.first?.params == [1000]
+          && recorder.starts.first?.final == UInt8(ascii: "p"))
+    send("hello")
+    check("payload streams before any terminator arrives",
+          String(decoding: recorder.payload, as: UTF8.self) == "hello")
+    check("and the string is still open", recorder.ends == 0)
+
+    // The ordering that a naive implementation gets wrong: the trailing
+    // payload has to be delivered before the end, not after it.
+    recorder.payload = []
+    send(" world\u{1b}\\")
+    check("the last payload arrives before the end is reported",
+          String(decoding: recorder.payload, as: UTF8.self) == " world" && recorder.ends == 1)
+    send("visible")
+    check("text after the terminator prints again", recorder.text == "visible")
+}
+
+section("tmux control mode")
+do {
+    var events: [TmuxEvent] = []
+    let client = TmuxControlClient()
+    client.onEvent = { events.append($0) }
+    func send(_ s: String) { client.feed(Array(s.utf8)[...]) }
+
+    // Captured verbatim from `tmux -CC` 3.7c on attach.
+    send("%begin 1788417588 280 0\r\n%end 1788417588 280 0\r\n")
+    send("%window-add @0\r\n%sessions-changed\r\n%session-changed $0 0\r\n")
+    check("an empty reply block is reported with no lines",
+          events.first == .reply(id: 280, lines: [], error: false))
+    check("window-add is read", events.contains(.windowAdd(window: "@0")))
+    check("sessions-changed is read", events.contains(.sessionsChanged))
+    check("session-changed carries id and name",
+          events.contains(.sessionChanged(session: "$0", name: "0")))
+
+    events = []
+    send("%output %0 \\033[1mbold\\033[0m\r\n")
+    let expected = Array("\u{1b}[1mbold\u{1b}[0m".utf8)
+    check("octal escapes in %output are decoded",
+          events == [.output(pane: "%0", bytes: expected)],
+          "got \(events)")
+
+    events = []
+    send("%output %0 a\\134b\r\n")
+    check("an escaped backslash decodes to one backslash",
+          events == [.output(pane: "%0", bytes: Array("a\\b".utf8))])
+
+    events = []
+    send("%output %0 \\xzz mid\r\n")
+    check("a malformed escape loses one character, not the line",
+          events == [.output(pane: "%0", bytes: Array("\\xzz mid".utf8))],
+          "got \(events)")
+
+    // The transport splits wherever the PTY read landed, so a line arriving in
+    // pieces — including across the CRLF — has to survive.
+    events = []
+    send("%window-ren")
+    send("amed @1 my")
+    send(" window\r")
+    send("\n")
+    check("a line split across four chunks is reassembled",
+          events == [.windowRenamed(window: "@1", name: "my window")],
+          "got \(events)")
+
+    // A reply body may itself begin with '%': list-panes prints pane ids.
+    events = []
+    send("%begin 1 7 1\r\n%0: [80x24]\r\n%1: [80x24]\r\n%end 1 7 1\r\n")
+    check("a '%' line inside a block is payload, not a notification",
+          events == [.reply(id: 7, lines: ["%0: [80x24]", "%1: [80x24]"], error: false)],
+          "got \(events)")
+
+    events = []
+    send("%begin 1 8 1\r\nno such window\r\n%error 1 8 1\r\n")
+    check("an error block is flagged",
+          events == [.reply(id: 8, lines: ["no such window"], error: true)])
+
+    events = []
+    send("%window-pane-changed @1 %3\r\n")
+    check("the active pane change is read — it is what moves a tab's contents",
+          events == [.windowPaneChanged(window: "@1", pane: "%3")])
+
+    events = []
+    send("%unlinked-window-close @1\r\n")
+    check("an unlinked close counts as a close",
+          events == [.windowClose(window: "@1")])
+
+    events = []
+    send("%exit \r\n")
+    send("%exit\r\n")
+    check("exit is read with or without a reason", events.count == 2)
+
+    events = []
+    send("%paste-buffer-changed buffer0\r\n")
+    check("an unhandled notification is surfaced rather than dropped",
+          events == [.other(name: "paste-buffer-changed", arguments: "buffer0")])
+
+    check("keys are sent as hex, which needs no quoting",
+          TmuxControlClient.hexKeys([0x1b, 0x5b, 0x41]) == "1b 5b 41")
+
+    // A block left open when tmux vanishes must not strand its caller.
+    events = []
+    send("%begin 1 9 1\r\npartial\r\n")
+    client.finish()
+    check("an unterminated block is closed as an error on teardown",
+          events == [.reply(id: 9, lines: ["partial"], error: true)])
+}
+
 section("settings search")
 do {
     // The index is also the Tab order, so a gap here is a control nobody can
