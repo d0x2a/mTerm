@@ -33,6 +33,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = MainMenu.build()
         installTabCycleShortcut()
 
+        #if DEBUG
+        // The ⌘K hub keeps its own list of the app's actions, for the keywords
+        // a menu title can't carry. The failure mode of a second list is silent
+        // drift — an action added to a menu and not to the index is simply
+        // unfindable — so the two are compared once, here, where a developer
+        // will see it and a user never pays for it.
+        let missing = CommandIndex.missingFromIndex(menu: NSApp.mainMenu!)
+        if !missing.isEmpty {
+            print("⚠️ CommandIndex is missing menu actions: \(missing.joined(separator: ", "))")
+        }
+        #endif
+
         let saved = Persistence.load()
         // An empty window when there are tabs to restore — see `restoreTabs`.
         let savedTabs = saved?.tabs ?? []
@@ -168,6 +180,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.newTab(initialCwd: nil, profile: profile)
     }
 
+    /// ⌘K. Toggling rather than only opening, so the chord that summoned it
+    /// also puts it away — the hub is a mode, and a mode you enter with a key
+    /// you expect to leave with the same key.
+    @objc func toggleCommandPalette(_ sender: Any?) {
+        activeController()?.toggleCommandPalette()
+    }
+
     @objc func closeActiveTab(_ sender: Any?) {
         // If an auxiliary window (e.g. Settings) is key, ⌘W closes that window
         // rather than a terminal tab in the background main window.
@@ -202,7 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return (controller?.tabCount ?? 0) > 0
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)):
             return (controller?.tabCount ?? 0) > 1
-        case #selector(openNewTabWithProfile(_:)):
+        case #selector(openNewTabWithProfile(_:)), #selector(toggleCommandPalette(_:)):
             return controller != nil
         case #selector(selectTabByNumber(_:)):
             let count = controller?.tabCount ?? 0

@@ -117,6 +117,19 @@ enum MainMenu {
         // View menu
         let viewMenuItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
+        // ⌘K. The spec's older draft put Clear Screen here; that moved to ⇧⌘K
+        // when the hub took the chord, and Clear Screen is a top-ranked row in
+        // the hub itself so the old reflex still lands somewhere useful.
+        let hub = viewMenu.addItem(withTitle: "Command Hub…",
+                                   action: #selector(AppDelegate.toggleCommandPalette(_:)),
+                                   keyEquivalent: "k")
+        hub.keyEquivalentModifierMask = [.command]
+        let clearScreen = viewMenu.addItem(withTitle: "Clear Screen",
+                                           action: #selector(TerminalView.clearScreen(_:)),
+                                           keyEquivalent: "k")
+        clearScreen.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(NSMenuItem.separator())
+
         let fullScreen = viewMenu.addItem(withTitle: "Enter Full Screen",
                                           action: #selector(NSWindow.toggleFullScreen(_:)),
                                           keyEquivalent: "f")

@@ -36,6 +36,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     private let gridHUD = GridSizeHUD()
     private var gridHUDHideTimer: Timer?
 
+    /// Tab ids, most recently selected first. The ⌘K hub reads it so an empty
+    /// query is a recent-tabs list rather than window order — which is what
+    /// makes ⌘K ⏎ a flip back to the tab you just left.
+    private var tabMRU: [UUID] = []
+    /// The ⌘K hub while it is up. One per window: it lists every window's tabs
+    /// but belongs to the one it was opened from.
+    private var palette: CommandPalette?
+
     /// Live while a tab in this window is running `tmux -CC`. One per window:
     /// a second `tmux -CC` elsewhere in the same window would be a second set
     /// of tabs fighting over the same sidebar.
@@ -145,6 +153,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
             tmux?.selectWindow(id: windowID)
         }
         activeTabId = id
+        tabMRU.removeAll { $0 == id }
+        tabMRU.insert(id, at: 0)
+        // Looking at the tab is the acknowledgement; the marker has done its job.
+        tabs.first { $0.id == id }?.wantsAttention = false
         installActiveTerminalView()
         refreshSidebar()
         if let tab = tabs.first(where: { $0.id == id }) {
@@ -178,6 +190,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     private func forceCloseTab(_ id: UUID) {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
         let removed = tabs.remove(at: idx)
+        tabMRU.removeAll { $0 == id }
         removed.terminalView.delegate = nil
         if removed.terminalView.superview != nil {
             removed.terminalView.removeFromSuperview()
@@ -244,11 +257,104 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    // MARK: the ⌘K hub
+
+    func toggleCommandPalette() {
+        if palette == nil { showCommandPalette() } else { dismissCommandPalette() }
+    }
+
+    func showCommandPalette() {
+        guard palette == nil else { return }
+
+        // Built while the terminal view is still first responder. `available()`
+        // asks the responder chain what it answers, and once the hub's search
+        // field has focus the chain answers copy:/paste:/selectAll: itself —
+        // every clipboard action would look valid in a window with no session.
+        let actions = CommandIndex.available()
+        let items = PaletteIndex.items(for: self, actions: actions)
+
+        let hub = CommandPalette()
+        hub.translatesAutoresizingMaskIntoConstraints = false
+        hub.onRun = { [weak self] command in self?.run(command) }
+        hub.onCloseTab = { [weak self] controller, tabId in
+            controller.closeTab(tabId)
+            self?.reloadCommandPalette()
+        }
+        hub.onDismiss = { [weak self] in self?.dismissCommandPalette() }
+        // The tab behind the hub, not the app-wide setting: a profile-pinned
+        // theme is immune to the light/dark switch, and the hub floating over
+        // such a tab has to be pinned with it.
+        hub.themeProvider = { [weak self] in
+            self?.activeTerminalView?.effectiveTheme ?? ThemeStore.currentTheme
+        }
+
+        contentContainer.addSubview(hub, positioned: .above, relativeTo: gridHUD)
+        let width = hub.widthAnchor.constraint(equalToConstant: CommandPalette.width)
+        width.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            hub.centerXAnchor.constraint(equalTo: contentContainer.centerXAnchor),
+            width,
+            hub.widthAnchor.constraint(lessThanOrEqualTo: contentContainer.widthAnchor,
+                                       constant: -64),
+            // A fraction of the height rather than a fixed inset, so the hub
+            // sits in the same place on a short window as on a tall one.
+            NSLayoutConstraint(item: hub, attribute: .top, relatedBy: .equal,
+                               toItem: contentContainer, attribute: .bottom,
+                               multiplier: 0.22, constant: 0),
+        ])
+
+        palette = hub
+        hub.reload(items: items, mru: tabMRU)
+        hub.focus()
+    }
+
+    func dismissCommandPalette() {
+        guard let hub = palette else { return }
+        palette = nil
+        hub.removeFromSuperview()
+        // Focus has to go back explicitly: removing the first responder's view
+        // leaves the window with none, and the terminal would swallow the next
+        // keystroke doing nothing with it.
+        if let view = activeTerminalView { window?.makeFirstResponder(view) }
+    }
+
+    /// Rebuilds the hub's list in place, after ⌘⌫ closed a tab out from under it.
+    private func reloadCommandPalette() {
+        guard let hub = palette else { return }
+        hub.reload(items: PaletteIndex.items(for: self, actions: CommandIndex.available()),
+                   mru: tabMRU)
+    }
+
+    private func run(_ command: PaletteCommand) {
+        dismissCommandPalette()
+        switch command {
+        case .switchTab(let controller, let tabId):
+            if controller !== self { controller.window?.makeKeyAndOrderFront(nil) }
+            controller.selectTab(tabId)
+        case .send(let selector):
+            // Deferred by one turn of the run loop: the hub's field editor is
+            // only fully out of the responder chain after this one, and an
+            // action sent before that lands on the search field instead of the
+            // terminal — `selectAll:` being the one that shows it loudest.
+            DispatchQueue.main.async { NSApp.sendAction(selector, to: nil, from: nil) }
+        case .newTabWithProfile(let id):
+            newTab(initialCwd: nil, profile: ProfileStore.shared.profile(id: id))
+        case .applyTheme(let id):
+            PaletteIndex.applyTheme(id: id)
+        case .openSetting(let field):
+            SettingsWindowController.show(focus: field)
+        case .tmuxNewWindow(let controller):
+            controller.tmuxNewWindow()
+        case .drillIntoThemes:
+            break       // handled inside the hub; it never runs a stage push.
+        }
+    }
+
     // MARK: internals
 
     private func installActiveTerminalView() {
         contentContainer.subviews.forEach {
-            if $0 !== gridHUD { $0.removeFromSuperview() }
+            if $0 !== gridHUD && $0 !== palette { $0.removeFromSuperview() }
         }
         guard let v = activeTerminalView else { return }
         v.translatesAutoresizingMaskIntoConstraints = false
@@ -360,9 +466,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func terminalView(_ view: TerminalView, didRequestAttention attention: TerminalAttention) {
+        guard let tab = tabs.first(where: { $0.terminalView === view }) else { return }
+
+        // Marks the tab for the ⌘K hub, ahead of every notification opt-out
+        // below: the row marker is the in-app trace of the same event, and a
+        // user who turned banners off still wants to find the tab that rang.
+        if !isTabFrontmost(tab) { tab.wantsAttention = true }
+
         let settings = ThemeStore.shared.settings
         guard settings.notificationsEnabled else { return }
-        guard let tab = tabs.first(where: { $0.terminalView === view }) else { return }
 
         // The bell is the noisy one (readline rings it on completion failures
         // too), so it has its own opt-out. OSC notifications are explicit

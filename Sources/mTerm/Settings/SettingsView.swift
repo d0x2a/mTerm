@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// Settings window: a System Settings-style sidebar of categories on the left,
@@ -20,6 +21,9 @@ struct SettingsView: View {
     /// The control a search result asked for, held until its pane has been
     /// laid out. Focus set on a view that doesn't exist yet is dropped.
     @State private var pendingFocus: SettingsField?
+
+    /// Set when something outside Settings — the ⌘K hub — asked for a control.
+    @ObservedObject private var route = SettingsRoute.shared
 
     private var results: [SettingsEntry] { SettingsIndex.search(query) }
 
@@ -74,6 +78,16 @@ struct SettingsView: View {
         // also what lets the Tab handler above see the key at all — onKeyPress
         // fires for the focused view and its ancestors, nothing else.
         .onAppear { focus = .sidebar }
+        // A ⌘K row lands exactly where a search result does: right pane, focus
+        // ring on the control. Cleared on the next turn of the run loop rather
+        // than inline — writing to an ObservableObject while SwiftUI is
+        // reading it is a mutation during view update.
+        .onReceive(route.$requested.compactMap { $0 }) { field in
+            guard let entry = SettingsIndex.all.first(where: { $0.field == field }) else { return }
+            query = ""
+            open(entry)
+            DispatchQueue.main.async { route.requested = nil }
+        }
         .environment(\.settingsKeyboardActive, keyboardActive)
     }
 

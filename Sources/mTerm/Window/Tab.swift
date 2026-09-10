@@ -13,6 +13,11 @@ final class Tab {
     /// opened with ⌘T follows the user's later change of default rather than
     /// pinning itself to whatever was default when it opened.
     let profileId: UUID?
+    /// Raised when the child rang the bell or posted an OSC notification while
+    /// this tab wasn't the one being looked at, and cleared when it is selected.
+    /// Only the ⌘K hub reads it today — it is what puts the bell marker on a
+    /// row — but it is the state the sidebar would need for the same badge.
+    var wantsAttention: Bool = false
     /// Set when this tab shows a tmux window rather than a shell of its own.
     /// Closing it closes the tmux window; it is not restored across launches,
     /// because the tmux server may be gone and reattaching is the user's call.

@@ -53,11 +53,17 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
-    static func show() {
+    /// `focus` opens the pane a control lives in and puts the focus ring on
+    /// the control itself — the same landing a Settings search result gets.
+    /// It's how a ⌘K row like "Appearance › Stroke weight" finishes the job:
+    /// arriving in the right pane and still having to hunt for the row would
+    /// be most of the work left undone.
+    static func show(focus field: SettingsField? = nil) {
         FontCatalogStore.shared.refresh()
         shared.showWindow(nil)
         shared.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if let field { SettingsRoute.shared.requested = field }
     }
 
     /// Sizes the window so the selected pane fits without scrolling, the way
@@ -125,6 +131,17 @@ final class SettingsWindowController: NSWindowController {
 
 /// Hosting controller that reports every AppKit layout pass, which is how the
 /// window learns that the selected pane (and so the content height) changed.
+/// A control something outside Settings asked it to open on.
+///
+/// A one-value channel rather than a parameter on `SettingsView`, because the
+/// window is built once and reused: the second ⌘K row that opens Settings has
+/// no new view to hand a parameter to, only a live one to steer.
+final class SettingsRoute: ObservableObject {
+    static let shared = SettingsRoute()
+    @Published var requested: SettingsField?
+    private init() {}
+}
+
 private final class SettingsHostingController: NSHostingController<SettingsView> {
     var onLayout: (() -> Void)?
 

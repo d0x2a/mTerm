@@ -10,7 +10,7 @@ mTerm is an alternative to iTerm2 for developers who want:
 - GPU-class rendering performance (Ghostty/Alacritty territory).
 - A small, sharp feature set instead of a thousand preferences.
 
-mTerm is **not** trying to be Warp. There are no AI features, no command palettes that rethink the shell, no cloud accounts. It is a fast, beautiful, modern terminal.
+mTerm is **not** trying to be Warp. There are no AI features, no cloud accounts, and nothing that rethinks the shell — the ⌘K hub navigates mTerm's own tabs and commands and never touches what you type at the prompt. It is a fast, beautiful, modern terminal.
 
 ## Non-goals
 
@@ -72,6 +72,7 @@ Key boundaries:
 - **Sidebar tab list, not the system tab bar.** Tabs live in a left-hand sidebar (custom `SidebarView` inside an `NSSplitViewController`), not in macOS's `NSWindowTabbing`. The sidebar is collapsible; tab rows show the current CWD basename / shell title. This trades the "merge windows / move tabs across windows" gestures for a denser, always-visible list that scales past ~10 tabs without overflow.
 - New tabs always start in `$HOME`. (Older drafts of the spec called for inheriting the active tab's CWD, but in practice that surprised users more often than it helped — especially for GUI-launched sessions where the active tab's CWD might be deep inside a project tree.)
 - ⌘T / ⌘W / ⌘⇧[ / ⌘⇧] for tab navigation. ⌘1–⌘9 to jump to tab N.
+- **⌘K opens the hub** — one search field over every tab (in every window) and every menu action, ranked together. Tab rows carry the index, run state, title, working directory and foreground process, because three tabs called `mTerm` is the normal case and the title alone never identifies one. Sections are ordered by their best-scoring member, so row 1 is always the best answer to ⏎. With an empty query it lists recent tabs with the previous one preselected, which makes ⌘K ⏎ a flip back. ⌘⌫ closes the highlighted tab without leaving the hub.
 - Tabs persist across launches if "Restore session" is enabled.
 
 ## Terminal Emulation
@@ -210,7 +211,8 @@ Sensible Mac defaults out of the box. All overridable.
 | Find regex | ⌥⌘F |
 | Next/prev match | ⌘G / ⇧⌘G |
 | Jump prev/next prompt | ⌘↑ / ⌘↓ |
-| Clear screen | ⌘K |
+| Command hub | ⌘K |
+| Clear screen | ⇧⌘K |
 | Reset terminal | ⌥⌘R |
 | Toggle full screen | ⌃⌘F |
 | Open Settings | ⌘, |

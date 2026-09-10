@@ -750,6 +750,17 @@ final class TerminalView: NSView, CALayerDelegate {
             NSCursor.resizeLeftRight.set()
             return
         }
+        // Some other view owns the pointer — the ⌘K hub floating above us is
+        // the one that matters. Our tracking area keeps reporting these moves
+        // (a sibling drawn on top doesn't suppress it), so without this the
+        // I-beam would be stamped over the hub every time the mouse twitched,
+        // beating whatever cursor that view asked for. Bail and let it set its
+        // own; ours is restored on the next move back over the terminal.
+        if let p = lastMouseWindowPoint,
+           let hit = window?.contentView?.hitTest(p),
+           hit !== self, !hit.isDescendant(of: self) {
+            return
+        }
         if commandHeld,
            let match = hoveredTriggerMatch(),
            match.trigger.clickAction != nil {
@@ -1155,6 +1166,22 @@ final class TerminalView: NSView, CALayerDelegate {
         // direction > 0 returns 0 if no prompt below — i.e. snap to bottom.
         scrollOffset = session.jumpToPrompt(direction: 1, from: scrollOffset) ?? 0
         scrollResidue = 0
+    }
+
+    /// Clears the screen and drops the scrollback with it — the "start again
+    /// with a clean window" ⌘K has meant in Terminal.app since forever.
+    ///
+    /// Written into the parser rather than reaching into TerminalState, so it
+    /// takes exactly the path `clear` takes: ED 2 pushes the screen to history,
+    /// ED 3 then purges the history, and the cursor goes home. Doing it through
+    /// the escape sequences means there is no second implementation of "clear"
+    /// that can disagree with the first.
+    @objc func clearScreen(_ sender: Any?) {
+        guard let session else { return }
+        scrollOffset = 0
+        scrollResidue = 0
+        session.receive(Array("\u{1b}[H\u{1b}[2J\u{1b}[3J".utf8))
+        invalidate()
     }
 
     private func bytesForKey(_ event: NSEvent) -> [UInt8] {
