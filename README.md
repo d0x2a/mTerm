@@ -8,7 +8,7 @@ A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
 ![mTerm showing a git log in the repository, with the tab sidebar on the left](docs/session.png)
 
-> **Status:** v1.0.0. Every line of the definition of done in [SPEC.md](SPEC.md) has shipped, including tmux `-CC` control mode, profiles, triggers and settings search. Two of the performance targets have been measured rather than asserted: scrollback memory is met with room to spare, throughput is well short of the figure the spec aspired to. Both numbers, and the harness that produced them, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+> **Status:** v1.1.0. Every line of the definition of done in [SPEC.md](SPEC.md) has shipped, including tmux `-CC` control mode, profiles, triggers and settings search, and ⌘K now searches every tab and command in one list. Two of the performance targets have been measured rather than asserted: scrollback memory is met with room to spare, throughput is well short of the figure the spec aspired to. Both numbers, and the harness that produced them, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Why
 
@@ -18,7 +18,7 @@ mTerm is an alternative to iTerm2 for developers who want:
 - GPU-class rendering (Ghostty/Alacritty territory).
 - A small, sharp feature set instead of a thousand preferences.
 
-It is **not** trying to be Warp. No AI features, no command palettes that rethink the shell, no cloud accounts. Just a fast, beautiful, modern terminal.
+It is **not** trying to be Warp. No AI features, no cloud accounts, and nothing that rethinks the shell — ⌘K navigates mTerm's own tabs and commands and never touches what you type at the prompt. Just a fast, beautiful, modern terminal.
 
 ## Install
 
@@ -45,6 +45,7 @@ swift run -c release mTerm
 ## What works today
 
 - AppKit-native window with tabbed sidebar (drag to reorder), full-screen, session restore (tabs, their directories and their profiles). The sidebar and split divider tint to the active theme.
+- ⌘K opens a hub over every tab in every window and every command on the menu bar, ranked in one list. A tab row shows its index, run state, title, directory and foreground process, because three tabs called "mTerm" is the common case and the title alone never identifies one. Sections lead with their best match, so the first row is always the best answer to ⏎. An empty query lists recent tabs with the previous one selected, making ⌘K ⏎ a flip back; ⌘⌫ closes the highlighted tab without leaving. Actions carry the words you'd arrive with rather than only their menu titles — "cls" finds Clear Screen, "blurry" finds Stroke weight and opens Settings with the focus ring on it.
 - Metal-rendered terminal view with pixel-snapped glyph atlas — crisp text at all sizes, no GPU filtering blur.
 - Bold and italic draw in the font's own faces, not a synthesised slant or smear, and the advance is identical across all four so the columns never drift. Underline, faint and inverse too, including the codes that turn each of them back off.
 - Resizing reflows the buffer: wrapped lines rejoin and re-split at the new width rather than being cut off, and the grid size shows in a readout while you drag.
@@ -77,6 +78,8 @@ swift run -c release mTerm
 | Find (regex) | ⌥⌘F |
 | Next / previous match | ⌘G / ⇧⌘G |
 | Jump previous / next prompt | ⌘↑ / ⌘↓ |
+| Command hub | ⌘K |
+| Clear screen | ⇧⌘K |
 | Toggle full screen | ⌃⌘F |
 | Open Settings | ⌘, |
 
