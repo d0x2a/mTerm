@@ -124,6 +124,8 @@ enum SettingsIndex {
         // General
         .init(.warnOnClose, .general, "Warn before closing a tab with a running process",
               "confirm prompt quit close vim ssh"),
+        .init(.confirmClearScreen, .general, "Confirm before clearing the screen",
+              "clear cls wipe erase reset scrollback history undo destructive"),
         .init(.scrollbackLines, .general, "Lines kept per tab",
               "scrollback history buffer memory lines depth"),
         .init(.shellIntegration, .general, "Track the prompt and working directory",

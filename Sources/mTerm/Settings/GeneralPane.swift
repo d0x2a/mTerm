@@ -29,6 +29,15 @@ struct GeneralPane: View {
                     .focusableControl(.warnOnClose, focus: $focus, onActivate: {
                         store.settings.warnOnCloseWithRunningProcess.toggle()
                     })
+                Toggle("Confirm before clearing the screen",
+                       isOn: $store.settings.confirmClearScreen)
+                    .focusableControl(.confirmClearScreen, focus: $focus, onActivate: {
+                        store.settings.confirmClearScreen.toggle()
+                    })
+                Text("⇧⌘K discards the screen and the scrollback with it, and sits "
+                     + "one key away from the ⌘K hub.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Scrollback") {

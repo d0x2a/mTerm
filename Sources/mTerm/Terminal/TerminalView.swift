@@ -1177,11 +1177,46 @@ final class TerminalView: NSView, CALayerDelegate {
     /// the escape sequences means there is no second implementation of "clear"
     /// that can disagree with the first.
     @objc func clearScreen(_ sender: Any?) {
+        guard session != nil else { return }
+        guard ThemeStore.shared.settings.confirmClearScreen else {
+            performClearScreen()
+            return
+        }
+        confirmClearScreen { [weak self] confirmed in
+            guard confirmed else { return }
+            self?.performClearScreen()
+        }
+    }
+
+    private func performClearScreen() {
         guard let session else { return }
         scrollOffset = 0
         scrollResidue = 0
         session.receive(Array("\u{1b}[H\u{1b}[2J\u{1b}[3J".utf8))
         invalidate()
+    }
+
+    /// Same shape as the close-a-running-tab confirmation: a sheet on the
+    /// window when there is one, a modal when there isn't, Escape on Cancel
+    /// and the key-equivalent hints on both buttons.
+    private func confirmClearScreen(then: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Clear the screen and scrollback?"
+        alert.informativeText = "Everything in this tab's history is discarded. "
+            + "This can't be undone."
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.last?.keyEquivalent = "\u{1b}" // Escape
+        alert.appendKeyEquivalentHints()
+        alert.enableButtonKeyboardNavigation()
+        guard let window else {
+            then(alert.runModal() == .alertFirstButtonReturn)
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            then(response == .alertFirstButtonReturn)
+        }
     }
 
     private func bytesForKey(_ event: NSEvent) -> [UInt8] {

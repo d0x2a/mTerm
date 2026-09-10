@@ -18,7 +18,7 @@ enum SettingsField: Hashable {
     case triggerEnabled, triggerName, triggerPattern, triggerSample
     case triggerStyle, triggerColor, triggerAction, triggerCommand
     // General
-    case warnOnClose, scrollbackLines, shellIntegration
+    case warnOnClose, confirmClearScreen, scrollbackLines, shellIntegration
     // Notifications
     case notificationsEnabled, notifyOnBell, notifyOnlyWhenUnfocused
 }

@@ -43,6 +43,13 @@ struct AppSettings: Codable, Equatable {
     var blinkCursor: Bool = false
     var warnOnCloseWithRunningProcess: Bool = true
 
+    /// Confirm ⇧⌘K before it runs. Clear Screen is the one command that
+    /// destroys something with no way back — it takes the same ED 2 / ED 3
+    /// path `clear` does, so the screen goes to history and the history is
+    /// then purged — and it sits one key away from ⌘K, which merely opens
+    /// the hub.
+    var confirmClearScreen: Bool = true
+
     /// Master switch for macOS notifications. When off, bell and OSC 9/777
     /// notification escapes are ignored (the bell still updates the screen as
     /// usual — it just won't post a banner).
@@ -75,6 +82,7 @@ struct AppSettings: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case appearanceMode, lightThemeId, darkThemeId, fontFamily, fontSize,
              strokeWeight, lineHeight, blinkCursor, warnOnCloseWithRunningProcess,
+             confirmClearScreen,
              notificationsEnabled, notifyOnBell, notifyOnlyWhenUnfocused,
              scrollbackLines, shellIntegrationEnabled, defaultProfileId
         /// Read-only key for migrating old settings; we never write it back.
@@ -92,6 +100,7 @@ struct AppSettings: Codable, Equatable {
         try c.encode(lineHeight, forKey: .lineHeight)
         try c.encode(blinkCursor, forKey: .blinkCursor)
         try c.encode(warnOnCloseWithRunningProcess, forKey: .warnOnCloseWithRunningProcess)
+        try c.encode(confirmClearScreen, forKey: .confirmClearScreen)
         try c.encode(notificationsEnabled, forKey: .notificationsEnabled)
         try c.encode(notifyOnBell, forKey: .notifyOnBell)
         try c.encode(notifyOnlyWhenUnfocused, forKey: .notifyOnlyWhenUnfocused)
@@ -127,6 +136,10 @@ struct AppSettings: Codable, Equatable {
         self.blinkCursor = try c.decodeIfPresent(Bool.self, forKey: .blinkCursor) ?? false
         self.warnOnCloseWithRunningProcess =
             try c.decodeIfPresent(Bool.self, forKey: .warnOnCloseWithRunningProcess) ?? true
+        // Absent from settings files written before this existed, which take
+        // the new default and start asking.
+        self.confirmClearScreen =
+            try c.decodeIfPresent(Bool.self, forKey: .confirmClearScreen) ?? true
         self.notificationsEnabled =
             try c.decodeIfPresent(Bool.self, forKey: .notificationsEnabled) ?? true
         self.notifyOnBell =
