@@ -1,6 +1,5 @@
 import AppKit
 import Metal
-import os
 import QuartzCore
 import simd
 
@@ -15,26 +14,6 @@ final class TerminalView: NSView, CALayerDelegate {
     /// `TmuxController` as its command channel.
     private(set) var session: Session?
     private var displayLink: CADisplayLink?
-
-    /// Live instances, maintained by `init`/`deinit`. Compare it against the
-    /// window's tab count; they must agree.
-    ///
-    /// Worth counting because a view that outlives its tab is otherwise
-    /// invisible. It keeps its Session, the PTY behind it and a 10,000-row
-    /// scrollback alive, and it stays reachable from the window the whole time
-    /// — so `leaks` reports nothing and there is no other signal at all.
-    ///
-    /// This exists because the GPU cost used to be far worse: each view owned a
-    /// CAMetalLayer whose drawable pool is several full backing stores, held
-    /// until the layer deallocated rather than when it left the view hierarchy.
-    /// That is now one pool for the window (see TerminalSurface), but the
-    /// counter is what proved the views themselves were being released, so keep
-    /// it honest.
-    private(set) static var liveCount = 0
-
-    private static let log = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "mTerm", category: "lifetime"
-    )
 
     weak var delegate: TerminalViewDelegate?
 
@@ -200,23 +179,9 @@ final class TerminalView: NSView, CALayerDelegate {
         // TerminalSurface underneath. This view is the input and hit-testing
         // layer (and the SearchBar's host), so its own layer stays empty.
         layerContentsRedrawPolicy = .never
-        TerminalView.liveCount += 1
-        Self.log.notice("TerminalView init - \(TerminalView.liveCount, privacy: .public) live")
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
-
-    /// Tripwire for the cost described on `liveCount`. Closing a tab has to
-    /// land here; if the log stays quiet while tabs come and go, a view is
-    /// being retained and its session and scrollback are retained with it.
-    ///
-    /// There is deliberately nothing to tear down. `displayLink` retains its
-    /// target, so a live one would have kept this from running at all — by the
-    /// time we get here `viewDidMoveToWindow` has already invalidated it.
-    deinit {
-        TerminalView.liveCount -= 1
-        Self.log.notice("TerminalView deinit - \(TerminalView.liveCount, privacy: .public) live")
-    }
 
     /// Called every tick. Detects theme changes and dispatches a cell remap so
     /// already-printed text picks up the new palette.
