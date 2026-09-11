@@ -8,7 +8,7 @@ A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
 ![mTerm showing a git log in the repository, with the tab sidebar on the left](docs/session.png)
 
-> **Status:** v1.1.0. Every line of the definition of done in [SPEC.md](SPEC.md) has shipped, including tmux `-CC` control mode, profiles, triggers and settings search, and ⌘K now searches every tab and command in one list. Two of the performance targets have been measured rather than asserted: scrollback memory is met with room to spare, throughput is well short of the figure the spec aspired to. Both numbers, and the harness that produced them, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+> **Status:** v1.1.1. Every line of the definition of done in [SPEC.md](SPEC.md) has shipped, including tmux `-CC` control mode, profiles, triggers and settings search, and ⌘K now searches every tab and command in one list. Two of the performance targets have been measured rather than asserted: scrollback memory is met with room to spare, throughput is well short of the figure the spec aspired to. Both numbers, and the harness that produced them, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Why
 
