@@ -12,16 +12,9 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 out="${TMPDIR:-/tmp}/mterm-tmuxcheck"
-swiftc -framework SwiftUI -o "$out" \
+swiftc -package-name mTerm -framework SwiftUI -o "$out" \
     scripts/tmuxcheck/main.swift \
-    Sources/mTerm/Terminal/TerminalState.swift \
-    Sources/mTerm/Terminal/Parser.swift \
-    Sources/mTerm/Theme/Theme.swift \
-    Sources/mTerm/Theme/ThemeStore.swift \
-    Sources/mTerm/App/AppSettings.swift \
-    Sources/mTerm/App/FontCatalog.swift \
-    Sources/mTerm/Tmux/TmuxControlClient.swift \
-    Sources/mTerm/Tmux/TmuxController.swift
+    $(find Sources/MTermCore -name '*.swift' | sort)
 
 status=0
 "$out" "$@" || status=$?

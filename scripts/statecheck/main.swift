@@ -687,5 +687,60 @@ do {
     check("and its tabs take the default profile", legacy?.tabs[0].profileId == nil)
 }
 
+section("key encoding")
+do {
+    // KeyEncoder is what a keystroke becomes on the wire, on every host. It was
+    // lifted out of TerminalView's NSEvent handling, and a remote client has to
+    // produce exactly these bytes or the shell behaves differently than it does
+    // at the Mac's own keyboard — so every branch is pinned here.
+    func wire(_ chord: KeyChord) -> String {
+        String(decoding: KeyEncoder.bytes(for: chord), as: UTF8.self)
+    }
+    func key(_ special: KeyChord.Special, _ mods: KeyModifiers = []) -> String {
+        wire(KeyChord(special: special, modifiers: mods))
+    }
+    func text(_ chars: String?, bare: String? = nil, _ mods: KeyModifiers = []) -> String {
+        wire(KeyChord(characters: chars, charactersIgnoringModifiers: bare ?? chars, modifiers: mods))
+    }
+    let esc = "\u{1B}"
+
+    check("enter is CR", key(.enter) == "\r")
+    check("shift-enter is ESC CR, so a TUI can tell newline from submit",
+          key(.enter, [.shift]) == esc + "\r")
+    check("and so is option-enter", key(.enter, [.option]) == esc + "\r")
+    check("backspace is DEL", key(.backspace) == "\u{7F}")
+    check("option-backspace deletes a word", key(.backspace, [.option]) == esc + "\u{7F}")
+    check("forward delete is CSI 3 ~", key(.forwardDelete) == esc + "[3~")
+    check("tab is HT", key(.tab) == "\t")
+    check("shift-tab is CSI Z", key(.tab, [.shift]) == esc + "[Z")
+    check("escape is ESC", key(.escape) == esc)
+
+    check("arrows are CSI A–D", [key(.up), key(.down), key(.right), key(.left)]
+          == [esc + "[A", esc + "[B", esc + "[C", esc + "[D"])
+    check("modified arrows carry xterm's 1 + shift + 2·option + 4·control",
+          key(.up, [.control]) == esc + "[1;5A" && key(.down, [.shift]) == esc + "[1;2B")
+    check("all three at once is 8", key(.up, [.shift, .option, .control]) == esc + "[1;8A")
+    check("option-left and option-right move by word instead",
+          key(.left, [.option]) == esc + "b" && key(.right, [.option]) == esc + "f")
+    check("but option-up is still a modified arrow", key(.up, [.option]) == esc + "[1;3A")
+    check("home, end, page up, page down",
+          [key(.home), key(.end), key(.pageUp), key(.pageDown)]
+          == [esc + "[H", esc + "[F", esc + "[5~", esc + "[6~"])
+
+    check("command-anything is an app shortcut, never input",
+          text("c", [.command]).isEmpty && key(.enter, [.command]).isEmpty)
+
+    check("option is meta: ESC before the bare key", text("∫", bare: "b", [.option]) == esc + "b")
+    check("meta lowercases unless shift is held",
+          text("B", bare: "B", [.option]) == esc + "b"
+          && text("B", bare: "B", [.option, .shift]) == esc + "B")
+    check("meta with no bare key sends nothing", text("x", bare: "", [.option]).isEmpty)
+
+    check("ordinary text passes through", text("a") == "a")
+    check("control letters arrive already as the control byte", text("\u{03}", [.control]) == "\u{03}")
+    check("text is UTF-8", KeyEncoder.bytes(for: KeyChord(characters: "é")) == [0xC3, 0xA9])
+    check("no characters, no bytes", text(nil).isEmpty)
+}
+
 print("\n\(failures == 0 ? "all checks passed" : "\(failures) check(s) FAILED")")
 exit(failures == 0 ? 0 : 1)

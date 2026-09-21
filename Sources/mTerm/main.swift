@@ -1,3 +1,4 @@
+import MTermApp
 import AppKit
 
 // Build-time hooks: render programmatic assets to disk and exit, used by

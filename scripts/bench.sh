@@ -10,15 +10,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 out="${TMPDIR:-/tmp}/mterm-bench"
 
-swiftc -O -whole-module-optimization -o "$out" \
+swiftc -O -whole-module-optimization -package-name mTerm -framework SwiftUI -o "$out" \
     scripts/bench/main.swift \
-    Sources/mTerm/Terminal/TerminalState.swift \
-    Sources/mTerm/Terminal/Parser.swift \
-    Sources/mTerm/Triggers/Trigger.swift \
-    Sources/mTerm/Triggers/TriggerEvaluator.swift \
-    Sources/mTerm/Theme/Theme.swift \
-    Sources/mTerm/Theme/ThemeStore.swift \
-    Sources/mTerm/App/AppSettings.swift \
-    Sources/mTerm/App/FontCatalog.swift
+    $(find Sources/MTermCore -name '*.swift' | sort)
 
 exec "$out" "$@"

@@ -85,7 +85,7 @@ n "⌘-hover the first: only the FIRST lights up. Identical text is not the"
 n "same link, and hovering one must not light up the other."
 echo
 b "9. COLOURED OUTPUT — hovering replaces the text colour"
-printf '   \033[32mM  Sources/mTerm/Renderer/Renderer.swift\033[0m\n'
+printf '   \033[32mM  Sources/MTermRender/Renderer.swift\033[0m\n'
 printf '   \033[31merror:\033[0m see \033[36mhttps://example.com/docs\033[0m for details\n'
 n "hovering one of these swaps its green/cyan for the accent, and it comes"
 n "back on the way out. Only the hovered link, never the rest of the line."
