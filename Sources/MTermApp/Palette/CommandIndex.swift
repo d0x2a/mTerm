@@ -103,10 +103,10 @@ enum CommandIndex {
         let indexed = Set(all.map { NSStringFromSelector($0.selector) })
         var missing: [String] = []
 
-        // Actions that are deliberately menu-only: separators and container
-        // items carry no selector, the standard hide/show-all items are noise
-        // in a search field, and the profile and tab-number items are already
-        // in the hub as generated rows rather than as fixed entries.
+        // Actions that are deliberately menu-only: separators carry no
+        // selector, the standard hide/show-all items are noise in a search
+        // field, and the profile and tab-number items are already in the hub
+        // as generated rows rather than as fixed entries.
         let exempt: Set<String> = [
             NSStringFromSelector(#selector(AppDelegate.openNewTabWithProfile(_:))),
             NSStringFromSelector(#selector(AppDelegate.selectTabByNumber(_:))),
@@ -120,7 +120,10 @@ enum CommandIndex {
 
         func walk(_ menu: NSMenu) {
             for item in menu.items {
-                if let submenu = item.submenu { walk(submenu) }
+                // A container isn't a command even when it has an action: AppKit
+                // gives it `submenuAction:` to open the submenu, whose items
+                // are the ones that count.
+                if let submenu = item.submenu { walk(submenu); continue }
                 guard let action = item.action else { continue }
                 let name = NSStringFromSelector(action)
                 if !indexed.contains(name), !exempt.contains(name), !missing.contains(name) {

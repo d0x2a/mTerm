@@ -31,8 +31,7 @@ package final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        NSApp.mainMenu = MainMenu.build()
-        installTabCycleShortcut()
+        let mainMenu = MainMenu.build()
 
         #if DEBUG
         // The ⌘K hub keeps its own list of the app's actions, for the keywords
@@ -40,11 +39,18 @@ package final class AppDelegate: NSObject, NSApplicationDelegate {
         // drift — an action added to a menu and not to the index is simply
         // unfindable — so the two are compared once, here, where a developer
         // will see it and a user never pays for it.
-        let missing = CommandIndex.missingFromIndex(menu: NSApp.mainMenu!)
+        //
+        // Against the menu as built, before it's installed: installing it is
+        // when AppKit adds its own Edit items — AutoFill, Writing Tools, Start
+        // Dictation, Emoji & Symbols — and those aren't mTerm's to index.
+        let missing = CommandIndex.missingFromIndex(menu: mainMenu)
         if !missing.isEmpty {
             print("⚠️ CommandIndex is missing menu actions: \(missing.joined(separator: ", "))")
         }
         #endif
+
+        NSApp.mainMenu = mainMenu
+        installTabCycleShortcut()
 
         let saved = Persistence.load()
         // An empty window when there are tabs to restore — see `restoreTabs`.
