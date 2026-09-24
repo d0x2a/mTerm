@@ -650,6 +650,58 @@ package final class TerminalState: ParserSink {
         lastPrinted = glyph
     }
 
+    /// `putGlyph` for a run of printable ASCII, a row's share at a time.
+    ///
+    /// Every glyph in the run is one column wide, so what `putGlyph` works out
+    /// per glyph can be worked out once per span: the cell differs only in its
+    /// scalar, and a half of a wide glyph can only be stranded at either end —
+    /// everything in between is overwritten. Each span is then one buffer
+    /// access instead of a checked subscript per cell, the largest single cost
+    /// the per-glyph path had.
+    package func parserPrintASCII(_ run: UnsafeBufferPointer<UInt8>) {
+        guard let src = run.baseAddress, run.count > 0 else { return }
+        // DEC special graphics redraws part of ASCII as line drawing; that
+        // stays a glyph at a time through `translate`.
+        if charsets[activeCharset] == 0x30 {
+            for b in run { parserPrint(Unicode.Scalar(b)) }
+            return
+        }
+        var i = 0
+        while i < run.count {
+            // At the right edge: one glyph through `putGlyph`, which owns
+            // autowrap, the PROMPT_SP check and DECAWM-off overwriting.
+            if cursorCol >= cols {
+                putGlyph(Unicode.Scalar(src[i]))
+                i += 1
+                continue
+            }
+            let col = cursorCol
+            let span = min(cols - col, run.count - i)
+            clearOrphan(at: col)
+            clearOrphan(at: col + span - 1)
+            let inv = currentAttrs.contains(.inverse)
+            var cell = Cell(
+                scalar: " ",
+                fg: inv ? currentBg : currentFg,
+                bg: inv ? currentFg : currentBg,
+                attrs: currentAttrs,
+                width: 1,
+                link: currentLink
+            )
+            let start = rowBase(cursorRow) + col
+            cells.withUnsafeMutableBufferPointer { buf in
+                let dst = buf.baseAddress! + start
+                for k in 0..<span {
+                    cell.scalar = Unicode.Scalar(src[i + k])
+                    dst[k] = cell
+                }
+            }
+            cursorCol = col + span
+            i += span
+        }
+        lastPrinted = Unicode.Scalar(src[run.count - 1])
+    }
+
     /// Applies the active G0/G1 designation. Only DEC special graphics ('0')
     /// remaps anything — that's what gives ncurses apps their box drawing when
     /// they don't emit the Unicode characters directly.

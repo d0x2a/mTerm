@@ -248,14 +248,17 @@ Sensible Mac defaults out of the box. All overridable.
 These are targets. Two of them now have measurements against them, in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md), produced by `scripts/bench.sh` — a
 headless harness that drives the real parser and grid the way `Session.drain`
-does. There is still no perf CI, so nothing catches a regression automatically.
+does — and `scripts/ptybench.sh`, which does the same through a real PTY. There
+is still no perf CI, so nothing catches a regression automatically.
 
-Where it stands: scrollback memory is **met** with 4.8× headroom (41.8 MB for
-10k lines × 200 cols). Throughput is **missed by roughly 34×** — 30 MB/s of
-parsing on an M3 Max against a 1 GB/s parse+render target that was written as
-an aspiration rather than derived from this code. The two latency targets and
-idle CPU are still unmeasured; they need instrumentation inside the app rather
-than a stopwatch. The harness covers the CPU half only and stops where the GPU
+Where it stands: scrollback memory is **met** with 4.9× headroom (41.2 MB for
+10k lines × 200 cols). Throughput is **missed by roughly 7×** — 150 MB/s of
+parsing plain text on an M3 Max against a 1 GB/s parse+render target that was
+written as an aspiration rather than derived from this code, and that no
+terminal can reach through a macOS PTY: the PTY alone delivers 175 MB/s, and
+mTerm takes a `cat` through it at 132 MB/s. The two latency targets and idle
+CPU are still unmeasured; they need instrumentation inside the app rather than
+a stopwatch. The harnesses cover the CPU half only and stop where the GPU
 begins.
 
 ## v1 Definition of Done ("Daily-driver minimum")

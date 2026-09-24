@@ -8,6 +8,14 @@ import Foundation
 /// `Parser.attach(_:)` instead.
 protocol ParserSink: AnyObject {
     func parserPrint(_ scalar: Unicode.Scalar)
+
+    /// A run of printable ASCII (0x20...0x7E) met in the ground state, handed
+    /// over whole. Most of what a terminal is sent is exactly this, and taking
+    /// it a glyph at a time put a protocol call, a width lookup and a checked
+    /// grid write on every byte of it — see docs/BENCHMARKS.md. Means the same
+    /// as `parserPrint` for each byte in turn.
+    func parserPrintASCII(_ run: UnsafeBufferPointer<UInt8>)
+
     func parserExecute(_ control: UInt8)
     func parserCSI(_ params: [Int], marker: UInt8?, intermediates: [UInt8], final: UInt8)
     func parserOSC(_ data: [UInt8], terminator: UInt8)
@@ -35,6 +43,12 @@ protocol ParserSink: AnyObject {
 /// device control string it doesn't implement — and emphatically not what
 /// mTerm did before, which was to print the payload as text.
 extension ParserSink {
+    /// A sink with no faster way to take a run gets it a glyph at a time,
+    /// which is what a run means.
+    func parserPrintASCII(_ run: UnsafeBufferPointer<UInt8>) {
+        for b in run { parserPrint(Unicode.Scalar(b)) }
+    }
+
     func parserWindowName(_ name: [UInt8]) {}
     func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8) {}
     func parserDCSPut(_ bytes: ArraySlice<UInt8>) {}
@@ -108,8 +122,28 @@ package final class Parser {
     private var utf8Remaining: Int = 0
 
     package func feed(bytes: UnsafeBufferPointer<UInt8>) {
-        for b in bytes {
-            consume(b)
+        guard let base = bytes.baseAddress else { flushDCS(); return }
+        let count = bytes.count
+        var i = 0
+        while i < count {
+            // Printable ASCII in the ground state goes to the sink as a run
+            // rather than through `consume` a byte at a time. It is what
+            // `groundByte` would do with each of them, including dropping a
+            // UTF-8 sequence the run cuts short.
+            if state == .ground {
+                var end = i
+                // 0x20...0x7E: anything below 0x20 wraps round to the top of
+                // the byte range, so one unsigned compare covers both edges.
+                while end < count, base[end] &- 0x20 < 0x5F { end += 1 }
+                if end > i {
+                    utf8Remaining = 0
+                    sink?.parserPrintASCII(UnsafeBufferPointer(start: base + i, count: end - i))
+                    i = end
+                    continue
+                }
+            }
+            consume(base[i])
+            i += 1
         }
         // Whatever payload this chunk ended mid-stream. The terminator path
         // flushes itself, before it reports the end.

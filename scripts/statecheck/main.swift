@@ -84,6 +84,111 @@ do {
     hfeed("中\u{8}\u{1b}[Ka\rx")
     check("a stray leading half doesn't take the glyph after it",
           row(h.snapshot(), 0) == "xa", "row 0 is \"\(row(h.snapshot(), 0))\"")
+
+    let (d, dfeed) = buffer(cols: 10, rows: 3)
+    dfeed("\u{1b}(0lqqk\u{1b}(Bok")
+    check("DEC line drawing still applies to a run of text",
+          row(d.snapshot(), 0) == "┌──┐ok", "row 0 is \"\(row(d.snapshot(), 0))\"")
+}
+
+section("printable runs")
+do {
+    // The parser hands printable ASCII over a run at a time, and TerminalState
+    // writes a run a span at a time. That has to land exactly as the same
+    // glyphs would one by one, which is what this sink does with them: it
+    // takes the protocol's default, and forwards everything else untouched.
+    final class GlyphAtATime: ParserSink {
+        let state: TerminalState
+        init(_ state: TerminalState) { self.state = state }
+        func parserPrint(_ scalar: Unicode.Scalar) { state.parserPrint(scalar) }
+        func parserExecute(_ control: UInt8) { state.parserExecute(control) }
+        func parserCSI(_ p: [Int], marker: UInt8?, intermediates: [UInt8], final: UInt8) {
+            state.parserCSI(p, marker: marker, intermediates: intermediates, final: final)
+        }
+        func parserOSC(_ data: [UInt8], terminator: UInt8) { state.parserOSC(data, terminator: terminator) }
+        func parserESC(_ final: UInt8, intermediates: [UInt8]) {
+            state.parserESC(final, intermediates: intermediates)
+        }
+        func parserWindowName(_ name: [UInt8]) { state.parserWindowName(name) }
+        func parserDCSStart(_ params: [Int], intermediates: [UInt8], final: UInt8) {
+            state.parserDCSStart(params, intermediates: intermediates, final: final)
+        }
+        func parserDCSPut(_ bytes: ArraySlice<UInt8>) { state.parserDCSPut(bytes) }
+        func parserDCSEnd() { state.parserDCSEnd() }
+    }
+
+    // Everything that decides where a glyph lands or what it overwrites:
+    // wide glyphs and marks, cursor moves, erases, backspace over a wide
+    // glyph, DEC line drawing, autowrap on and off, scroll regions, inverse,
+    // hyperlinks, and runs long enough to wrap several times.
+    var seed: UInt64 = 0x9E3779B97F4A7C15
+    func next(_ n: Int) -> Int {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
+        return Int(seed % UInt64(n))
+    }
+    let esc = "\u{1b}"
+    let words = ["the", "grid", "x", "a=b", "~/src", "longerthanthenarrowestgrid"]
+    var text = ""
+    while text.utf8.count < 60_000 {
+        switch next(20) {
+        case 0: text += "\(esc)[\(1 + next(8));\(1 + next(90))H"
+        case 1: text += ["日本語", "한", "😀", "e\u{0301}", "ｆｕ"][next(5)]
+        case 2: text += "\r"
+        case 3: text += "\u{8}\u{8}"
+        case 4: text += next(2) == 0 ? "\(esc)(0" : "\(esc)(B"
+        case 5: text += next(2) == 0 ? "\(esc)[?7l" : "\(esc)[?7h"
+        case 6: text += next(2) == 0 ? "\(esc)[7m" : "\(esc)[27m"
+        case 7: text += "\(esc)]8;;https://x.test/\(next(9))\u{7}"
+        case 8: text += "\(esc)]8;;\u{7}"
+        case 9: text += "\r\n"
+        case 10: text += "\(esc)[\(1 + next(3));\(4 + next(4))r"
+        case 11: text += "\(esc)[r"
+        case 12: text += "\t"
+        case 13: text += "\(esc)[\(next(3))K"
+        // Back onto a wide glyph's head, maybe erase up to it, then print
+        // across its tail: the one shape where writing a span and writing a
+        // glyph at a time have come apart, so it is not left to chance.
+        case 16, 17, 18:
+            text += ["日本語", "한", "😀", "ｆｕ"][next(4)] + "\u{8}\u{8}"
+            if next(2) == 0 { text += "\(esc)[1K" }
+            text += words[next(words.count)]
+        default: text += words[next(words.count)] + String(repeating: "q", count: next(40))
+        }
+    }
+    let bytes = Array(text.utf8)
+
+    for cols in [80, 13, 1] {
+        let runs = TerminalState(cols: cols, rows: 4, scrollback: 50)
+        let glyphs = TerminalState(cols: cols, rows: 4, scrollback: 50)
+        let runParser = Parser(), glyphParser = Parser()
+        runParser.sink = runs
+        glyphParser.sink = GlyphAtATime(glyphs)
+        // Ragged chunks, like PTY reads, so runs are cut at every kind of edge.
+        bytes.withUnsafeBufferPointer { buf in
+            var off = 0
+            while off < buf.count {
+                let n = min(1 + next(700), buf.count - off)
+                let chunk = UnsafeBufferPointer(start: buf.baseAddress! + off, count: n)
+                runParser.feed(bytes: chunk)
+                glyphParser.feed(bytes: chunk)
+                off += n
+            }
+        }
+        // Every page of history as well as the screen.
+        var same = runs.snapshot().scrollbackLines == glyphs.snapshot().scrollbackLines
+            && runs.snapshot().cursorCol == glyphs.snapshot().cursorCol
+            && runs.snapshot().cursorRow == glyphs.snapshot().cursorRow
+        var offset = 0
+        while same {
+            let a = runs.viewportSnapshot(scrollOffset: offset)
+            let b = glyphs.viewportSnapshot(scrollOffset: offset)
+            same = a.rowOffset == b.rowOffset && a.rowWrapped == b.rowWrapped
+                && a.cells.withUnsafeBytes { x in b.cells.withUnsafeBytes { y in x.elementsEqual(y) } }
+            if offset >= a.scrollbackLines { break }
+            offset = min(offset + a.rows, a.scrollbackLines)
+        }
+        check("runs land exactly as glyphs one at a time at \(cols) columns", same)
+    }
 }
 
 section("scrollback")
