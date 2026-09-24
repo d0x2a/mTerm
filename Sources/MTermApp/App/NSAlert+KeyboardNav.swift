@@ -4,10 +4,11 @@ extension NSAlert {
     /// Makes Tab cycle only between the alert's buttons.
     ///
     /// By default (with Full Keyboard Access on) Tab also lands on the
-    /// selectable message/informative labels, highlighting their text instead
-    /// of moving between the buttons. We pull those labels out of the key view
-    /// loop and wire the buttons into a closed loop so Tab toggles button↔button
-    /// the way a native confirmation dialog should.
+    /// selectable message/informative labels, and on any text in an accessory
+    /// view, highlighting that text instead of moving between the buttons. We
+    /// pull those out of the key view loop and wire the buttons into a closed
+    /// loop so Tab toggles button↔button the way a native confirmation dialog
+    /// should.
     ///
     /// Call this after the buttons are added and before presenting the alert.
     func enableButtonKeyboardNavigation() {
@@ -64,6 +65,16 @@ extension NSAlert {
         for subview in view.subviews {
             if let field = subview as? NSTextField {
                 field.refusesFirstResponder = true
+            }
+            // A text view in an accessory view otherwise takes first
+            // responder when the sheet opens and swallows the first Return,
+            // leaving the default button needing two presses. NSTextView has
+            // no `refusesFirstResponder`; it stops accepting focus when it is
+            // neither editable nor selectable, which is what an alert's text
+            // should be anyway.
+            if let textView = subview as? NSTextView {
+                textView.isEditable = false
+                textView.isSelectable = false
             }
             removeTextFieldsFromKeyLoop(in: subview)
         }

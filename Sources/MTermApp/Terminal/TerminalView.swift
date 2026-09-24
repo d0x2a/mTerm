@@ -134,6 +134,21 @@ final class TerminalView: NSView, CALayerDelegate {
     private var pathExistsCache: [String: Bool] = [:]
     private var pathCacheStamp: CFTimeInterval = 0
     private static let pathCacheTTL: CFTimeInterval = 2.0
+
+    /// The command block under the pointer while ⌘ is held, with what it was
+    /// derived from. Holding ⌘ and moving marks a frame dirty on every mouse
+    /// event, and rebuilding the viewport's logical lines sixty times a second
+    /// to answer the same question is the cost the trigger memo already exists
+    /// to avoid.
+    private var commandBlockCache: (row: Int, fingerprint: Int, block: CommandBlock?)?
+    /// `$PATH` answers behind the command gate, on the same TTL as the file
+    /// path cache, so a tool installed mid-session is recognised within it.
+    private var executableCache: [String: Bool] = [:]
+    /// The extent the open copy sheet is offering, marked in the grid behind
+    /// it so adjusting an edge is visible where the text actually is. Drawn
+    /// whether or not ⌘ is still held — the sheet is the affordance now.
+    private var pendingCopyExtent: ClosedRange<Int>?
+    private var copySheet: CommandCopySheet?
     /// Memo for evaluateTriggers. Kept separate from currentTriggerMatches,
     /// which is cleared whenever ⌘ comes up — reusing that as the memo would
     /// hand back an empty result the next time ⌘ went down on an unchanged
@@ -372,6 +387,13 @@ final class TerminalView: NSView, CALayerDelegate {
                 handleTriggerClick(match)
                 return                       // don't start a selection
             }
+            if let session {
+                let snapshot = session.snapshot(scrollOffset: scrollOffset)
+                if let block = commandBlock(at: coord, snapshot: snapshot) {
+                    confirmCopy(block, snapshot: snapshot)
+                    return                   // don't start a selection
+                }
+            }
         }
 
         if sendMouse(event, button: MouseReport.left, kind: .press, coord: coord) { return }
@@ -475,6 +497,8 @@ final class TerminalView: NSView, CALayerDelegate {
         var expired = false
         if now - pathCacheStamp > Self.pathCacheTTL {
             pathExistsCache.removeAll(keepingCapacity: true)
+            executableCache.removeAll(keepingCapacity: true)
+            commandBlockCache = nil
             pathCacheStamp = now
             expired = true
         }
@@ -589,6 +613,111 @@ final class TerminalView: NSView, CALayerDelegate {
     private func hoveredTriggerMatch() -> TriggerMatch? {
         guard let coord = lastMouseCoord else { return nil }
         return triggerMatch(at: coord)
+    }
+
+    /// One band per row of an extent, spanning that row's text rather than the
+    /// full width: a block is a region, and marking the padding either side of
+    /// it would claim cells the copy never touches.
+    private func rowBands(_ rows: ClosedRange<Int>,
+                          snapshot: TerminalSnapshot) -> [HighlightBand] {
+        var bands: [HighlightBand] = []
+        for row in rows where row >= 0 && row < snapshot.rows {
+            let base = snapshot.rowStart(row)
+            var first = 0
+            while first < snapshot.cols, snapshot.cells[base + first].scalar == " " { first += 1 }
+            var last = snapshot.cols - 1
+            while last >= first, snapshot.cells[base + last].scalar == " " { last -= 1 }
+            guard last >= first else { continue }
+            bands.append(HighlightBand(col: first,
+                                       row: row,
+                                       length: last - first + 1,
+                                       color: lastAppliedTheme.selection,
+                                       style: .background))
+        }
+        return bands
+    }
+
+    // MARK: command blocks
+
+    /// The command block under the pointer, or nil when there isn't one.
+    ///
+    /// A link wins wherever it matches: it is the narrower target, and it is
+    /// the one ⌘-click already had a meaning for.
+    private func hoveredCommandBlock(snapshot: TerminalSnapshot) -> CommandBlock? {
+        guard commandHeld, let point = lastMouseWindowPoint else { return nil }
+        let coord = cellCoord(at: convert(point, from: nil))
+        if let match = triggerMatch(at: coord), match.trigger.clickAction != nil { return nil }
+        return commandBlock(at: coord, snapshot: snapshot)
+    }
+
+    /// Takes the snapshot rather than fetching one: the frame that marks the
+    /// block already has it, and a ⌘-hover asks once per frame.
+    private func commandBlock(at coord: (col: Int, row: Int),
+                              snapshot: TerminalSnapshot) -> CommandBlock? {
+        let fingerprint = triggerFingerprint(snapshot)
+        if let cache = commandBlockCache, cache.row == coord.row, cache.fingerprint == fingerprint {
+            return cache.block
+        }
+        let block = CommandBlockDetector.block(containingRow: coord.row,
+                                               snapshot: snapshot,
+                                               isExecutable: { [weak self] in
+                                                   self?.isExecutable($0) ?? false
+                                               })
+        commandBlockCache = (coord.row, fingerprint, block)
+        return block
+    }
+
+    /// Shell builtins never appear in `$PATH`, and a block that opens with one
+    /// is still a command.
+    private static let shellBuiltins: Set<String> = [
+        "cd", "export", "source", "alias", "unalias", "set", "unset", "eval", "exec",
+    ]
+
+    private func isExecutable(_ name: String) -> Bool {
+        if Self.shellBuiltins.contains(name) { return true }
+        if let cached = executableCache[name] { return cached }
+        let fm = FileManager.default
+        let found: Bool
+        if name.contains("/") {
+            found = fm.isExecutableFile(atPath: (name as NSString).expandingTildeInPath)
+        } else {
+            let path = ProcessInfo.processInfo.environment["PATH"]
+                ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+            found = path.split(separator: ":").contains {
+                fm.isExecutableFile(atPath: "\($0)/\(name)")
+            }
+        }
+        executableCache[name] = found
+        return found
+    }
+
+    /// Asks before writing, because ⌘-click on plain text costs nothing today
+    /// and silently replacing the clipboard is not a thing to learn by losing
+    /// what was on it. The sheet shows the command in the terminal's own font
+    /// and theme, and lets either edge of the extent be nudged a line.
+    private func confirmCopy(_ block: CommandBlock, snapshot: TerminalSnapshot) {
+        let lines = CommandBlockDetector.logicalLines(snapshot)
+        guard let first = lines.firstIndex(where: { $0.firstRow <= block.firstRow && block.firstRow <= $0.lastRow }),
+              let last = lines.firstIndex(where: { $0.firstRow <= block.lastRow && block.lastRow <= $0.lastRow })
+        else { return }
+
+        let sheet = CommandCopySheet(
+            lines: lines,
+            span: first...last,
+            theme: lastAppliedTheme,
+            extentChanged: { [weak self] extent in
+                guard let self else { return }
+                self.pendingCopyExtent = extent
+                self.invalidate()
+            },
+            copy: { text in
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(text, forType: .string)
+            })
+        // Held until the sheet closes; nothing else owns it.
+        copySheet = sheet
+        sheet.present(in: window)
     }
 
     private func triggerMatch(at coord: (col: Int, row: Int)) -> TriggerMatch? {
@@ -1410,6 +1539,13 @@ final class TerminalView: NSView, CALayerDelegate {
     private func composedHighlights(snapshot: TerminalSnapshot) -> [HighlightBand] {
         var bands: [HighlightBand] = []
 
+        // What the open sheet would copy. Not gated on ⌘: by the time the
+        // sheet is up the key is long released, and the point of marking is to
+        // show which lines the answer covers.
+        if let extent = pendingCopyExtent {
+            bands.append(contentsOf: rowBands(extent, snapshot: snapshot))
+        }
+
         // Trigger highlights only show while ⌘ is held — same affordance
         // iTerm and Terminal.app use for "this is clickable". Drawn first
         // so search highlights paint on top.
@@ -1430,6 +1566,13 @@ final class TerminalView: NSView, CALayerDelegate {
                     color: m.trigger.color,
                     style: style
                 ))
+            }
+
+            // The command block under the pointer is marked as a region, not
+            // as a run of text: what lights up is the extent ⌘-click copies,
+            // and a block is an area in a way a link never is.
+            if let block = hoveredCommandBlock(snapshot: snapshot) {
+                bands.append(contentsOf: rowBands(block.firstRow...block.lastRow, snapshot: snapshot))
             }
 
             // The link under the pointer is marked whatever its trigger's own

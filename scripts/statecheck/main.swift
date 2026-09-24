@@ -742,5 +742,270 @@ do {
     check("no characters, no bytes", text(nil).isEmpty)
 }
 
+section("command blocks")
+do {
+    // The shape a markdown-rendering TUI prints: prose, a blank line, a
+    // command over several lines, a blank line, another command. Nothing in
+    // the bytes says which is which — that is the whole problem — so the
+    // detector has only the blank lines and the first line's content to work
+    // from.
+    let (state, feed) = buffer(cols: 60, rows: 14)
+    feed("  Two edits to the live Deployment. Order matters:\r\n")
+    feed("\r\n")
+    feed("  kubectl -n ahead patch deploy app --type=json -p '[{\r\n")
+    feed("    \"path\": \"/spec/template/spec/containers/0/env/0\",\r\n")
+    feed("    \"value\": {\"name\": \"REDIS_PASSWORD\"}}]'\r\n")
+    feed("\r\n")
+    feed("  kubectl -n ahead set env deploy/app \\\r\n")
+    feed("    'ConnectionStrings__Redis=cache:6379'\r\n")
+    let snap = state.snapshot()
+    let installed: (String) -> Bool = { $0 == "kubectl" }
+    func blockAt(_ r: Int) -> CommandBlock? {
+        CommandBlockDetector.block(containingRow: r, snapshot: snap, isExecutable: installed)
+    }
+
+    check("a command block is found from any of its rows",
+          blockAt(2)?.firstRow == 2 && blockAt(3)?.firstRow == 2 && blockAt(4)?.firstRow == 2)
+    check("and it ends at the blank line", blockAt(3)?.lastRow == 4)
+    check("the prose paragraph above is not one", blockAt(0) == nil)
+    check("nor is a blank row", blockAt(1) == nil)
+    check("the second command is its own block",
+          blockAt(6)?.firstRow == 6 && blockAt(6)?.lastRow == 7)
+
+    check("the copied text drops the block's common indent",
+          blockAt(3)?.text.hasPrefix("kubectl -n ahead patch") == true,
+          blockAt(3).map { String($0.text.prefix(24)) } ?? "nil")
+    check("but keeps the indent inside it",
+          blockAt(3)?.text.contains("\n  \"path\"") == true)
+    check("and trims the row padding",
+          blockAt(3)?.text.contains("  \n") == false && blockAt(3)?.text.hasSuffix(" ") == false)
+    check("a trailing continuation backslash survives",
+          blockAt(6)?.text.contains("deploy/app \\\n") == true)
+
+    // A gutter bullet is the renderer talking, not part of the command.
+    let (bulleted, feedBullet) = buffer(cols: 40, rows: 6)
+    feedBullet("\u{23FA} kubectl get pods\r\n")
+    feedBullet("    --namespace ahead\r\n")
+    let bulletBlock = CommandBlockDetector.block(containingRow: 0,
+                                                 snapshot: bulleted.snapshot(),
+                                                 isExecutable: installed)
+    check("the bullet in front of a block is not copied",
+          bulletBlock?.text == "kubectl get pods\n  --namespace ahead",
+          bulletBlock.map { $0.text.debugDescription } ?? "nil")
+
+    // A command too long for the window is still one command.
+    let (narrow, feedNarrow) = buffer(cols: 20, rows: 6)
+    feedNarrow("kubectl get pods --all-namespaces\r\n")
+    let wrapped = CommandBlockDetector.block(containingRow: 1,
+                                             snapshot: narrow.snapshot(),
+                                             isExecutable: installed)
+    check("a wrapped command is copied without the wrap",
+          wrapped?.text == "kubectl get pods --all-namespaces",
+          wrapped.map { $0.text.debugDescription } ?? "nil")
+    check("and marking covers every row it wrapped onto",
+          wrapped?.firstRow == 0 && wrapped?.lastRow == 1)
+
+    // A wall of output is not a command block, whatever its first line says.
+    let (wall, feedWall) = buffer(cols: 30, rows: 60, scrollback: 0)
+    feedWall("kubectl logs -f pod\r\n")
+    for i in 0..<50 { feedWall("line \(i) of output\r\n") }
+    check("a wall of unbroken output is left alone",
+          CommandBlockDetector.block(containingRow: 3, snapshot: wall.snapshot(),
+                                     isExecutable: installed) == nil)
+
+    // The gate itself.
+    let none: (String) -> Bool = { _ in false }
+    check("an installed tool is a command",
+          CommandBlockDetector.looksLikeCommand("npm test", isExecutable: { $0 == "npm" }))
+    check("a tool you don't have is still one if it carries a flag",
+          CommandBlockDetector.looksLikeCommand("terraform apply -auto-approve", isExecutable: none))
+    check("a tool you don't have with no flag is not",
+          !CommandBlockDetector.looksLikeCommand("pulumi up", isExecutable: none))
+    check("prose is not a command",
+          !CommandBlockDetector.looksLikeCommand("Two edits to the live Deployment.", isExecutable: none))
+    check("a prompt in front of the command is not the command",
+          CommandBlockDetector.looksLikeCommand("$ kubectl get pods", isExecutable: { $0 == "kubectl" }))
+    check("nor are the environment assignments before it",
+          CommandBlockDetector.looksLikeCommand("LOG=debug RUST_BACKTRACE=1 myapp", isExecutable: { $0 == "myapp" }))
+    check("sudo is not the command either",
+          CommandBlockDetector.looksLikeCommand("sudo systemctl restart nginx", isExecutable: { $0 == "systemctl" }))
+    check("a pipeline counts", CommandBlockDetector.looksLikeCommand("cat x | grep y", isExecutable: none))
+
+    // A transcript is a command followed by what it printed. Copying the
+    // output back into a shell is never the ask, and neither is the prompt.
+    let (transcript, feedTranscript) = buffer(cols: 70, rows: 6)
+    feedTranscript("$ kubectl rollout restart deployment/payments-api -n payments\r\n")
+    feedTranscript("deployment.apps/payments-api restarted\r\n")
+    let tSnap = transcript.snapshot()
+    let cmdOnly = CommandBlockDetector.block(containingRow: 0, snapshot: tSnap, isExecutable: installed)
+    check("a prompted command stops before its output", cmdOnly?.lastRow == 0)
+    check("and the prompt is not copied with it",
+          cmdOnly?.text == "kubectl rollout restart deployment/payments-api -n payments",
+          cmdOnly.map { $0.text.debugDescription } ?? "nil")
+    check("pointing at the output is not pointing at the command",
+          CommandBlockDetector.block(containingRow: 1, snapshot: tSnap, isExecutable: installed) == nil)
+
+    // …but a command that continues onto the next lines is still one command.
+    let (cont, feedCont) = buffer(cols: 80, rows: 8)
+    feedCont("$ kubectl create secret generic payments-db-credentials \\\r\n")
+    feedCont("    --from-literal=DB_USER=payments_svc \\\r\n")
+    feedCont("    --dry-run=client -o yaml | kubectl apply -f -\r\n")
+    feedCont("secret/payments-db-credentials created\r\n")
+    let contBlock = CommandBlockDetector.block(containingRow: 1, snapshot: cont.snapshot(),
+                                               isExecutable: installed)
+    check("continuation lines stay with the command", contBlock?.lastRow == 2)
+    check("the backslashes survive the copy",
+          contBlock?.text.hasPrefix("kubectl create secret generic payments-db-credentials \\\n") == true,
+          contBlock.map { String($0.text.prefix(60)).debugDescription } ?? "nil")
+    check("and the output after it is left out",
+          contBlock?.text.contains("created") == false)
+
+    // `#` is a comment far more often than it is a root prompt.
+    check("a comment keeps its hash",
+          CommandBlockDetector.strippingPrompt("# rotate the credentials") == nil)
+    check("a variable is not a prompt", CommandBlockDetector.strippingPrompt("$PATH is set") == nil)
+    check("a prompt is a sigil and a space",
+          CommandBlockDetector.strippingPrompt("$ npm test") == "npm test")
+
+    // How a TUI actually prints a list of commands: a numbered heading, then
+    // the command, no blank line between them. The run holds both, so the
+    // heading has to be split off or nothing is a target at all.
+    let (list, feedList) = buffer(cols: 80, rows: 12)
+    feedList(" 1. Recreate the whole secret with new values (idempotent)\r\n")
+    feedList("  kubectl create secret generic moonbase-db-creds \\\r\n")
+    feedList("    --from-literal=DB_USER=astro_admin \\\r\n")
+    feedList("    --dry-run=client -o yaml | kubectl apply -f -\r\n")
+    feedList("\r\n")
+    feedList("  7. Restart the pods so they pick up the new values\r\n")
+    feedList("  kubectl rollout restart deployment/moonbase-api -n lunar-prod\r\n")
+    feedList("  kubectl rollout status deployment/moonbase-api -n lunar-prod\r\n")
+    let lSnap = list.snapshot()
+    func listBlock(_ r: Int) -> CommandBlock? {
+        CommandBlockDetector.block(containingRow: r, snapshot: lSnap, isExecutable: installed)
+    }
+    check("a command under a heading is still found", listBlock(1)?.firstRow == 1)
+    check("and the heading is not part of it", listBlock(1)?.lastRow == 3)
+    check("the heading itself is not a target", listBlock(0) == nil)
+    check("the copy starts at the command",
+          listBlock(2)?.text.hasPrefix("kubectl create secret") == true,
+          listBlock(2).map { String($0.text.prefix(30)).debugDescription } ?? "nil")
+    check("two commands in a row are one block",
+          listBlock(6)?.firstRow == 6 && listBlock(6)?.lastRow == 7)
+    check("and both are copied",
+          listBlock(7)?.text.contains("rollout restart") == true
+            && listBlock(7)?.text.contains("rollout status") == true)
+
+    // Not every command runs on with a backslash. A JSON payload just ends
+    // mid-quote, and half of it is worse than none.
+    check("an unclosed quote keeps the command going",
+          CommandBlockDetector.isIncomplete("kubectl patch -p '[{\"op\":\"add\","))
+    check("an unclosed brace does too",
+          CommandBlockDetector.isIncomplete("foo --data {\"a\": 1"))
+    check("a finished command does not",
+          !CommandBlockDetector.isIncomplete("kubectl get pods -n prod"))
+    check("an apostrophe inside double quotes is not an open quote",
+          !CommandBlockDetector.isIncomplete("echo \"don't\""))
+    check("an escaped quote is not an open quote",
+          !CommandBlockDetector.isIncomplete("echo \\\"x\\\""))
+
+    // A flag only counts near the front of the line. Prose that mentions one
+    // arrives at it late — this is a real line from a Claude Code screen, the
+    // echo of a prompt, and it was marked as a command until the lookahead.
+    check("a sentence that mentions a flag is not a command",
+          !CommandBlockDetector.looksLikeCommand(
+            "two spaces indent saying --namespace ahead, then echo done.", isExecutable: none))
+    check("but a subcommand before the flag still is",
+          CommandBlockDetector.looksLikeCommand(
+            "aws ec2 describe-instances --region us-east-1", isExecutable: none))
+    check("and a flag right after the command name certainly is",
+          CommandBlockDetector.looksLikeCommand("terraform apply -auto-approve", isExecutable: none))
+
+    // A heredoc's body is its argument. Copying the opener alone gives a
+    // command that sits waiting on stdin, which is worse than copying nothing.
+    check("a quoted heredoc delimiter is read",
+          CommandBlockDetector.heredocDelimiter("cat <<'EOF' | kubectl apply -f -") == "EOF")
+    check("so is a bare one", CommandBlockDetector.heredocDelimiter("cat <<EOF") == "EOF")
+    check("and a dashed, double-quoted one",
+          CommandBlockDetector.heredocDelimiter("cat <<-\"END\" > f") == "END")
+    check("a command with no heredoc has no delimiter",
+          CommandBlockDetector.heredocDelimiter("kubectl get pods -n prod") == nil)
+
+    let (here, feedHere) = buffer(cols: 70, rows: 14)
+    feedHere(" 5. Update from a heredoc\r\n")
+    feedHere("  cat <<'EOF' | kubectl apply -f -\r\n")
+    feedHere("  apiVersion: v1\r\n")
+    feedHere("  metadata:\r\n")
+    feedHere("    name: stripe-api\r\n")
+    feedHere("\r\n")                       // a body may contain blank lines
+    feedHere("  type: Opaque\r\n")
+    feedHere("  EOF\r\n")
+    feedHere("secret/stripe-api configured\r\n")
+    let hSnap = here.snapshot()
+    func hereBlock(_ r: Int) -> CommandBlock? {
+        CommandBlockDetector.block(containingRow: r, snapshot: hSnap, isExecutable: installed)
+    }
+    check("a heredoc runs to its terminator",
+          hereBlock(1)?.firstRow == 1 && hereBlock(1)?.lastRow == 7,
+          hereBlock(1).map { "\($0.firstRow)-\($0.lastRow)" } ?? "nil")
+    check("a blank line inside the body does not end it",
+          hereBlock(6)?.firstRow == 1 && hereBlock(6)?.lastRow == 7)
+    check("pointing anywhere in the body finds the same command",
+          hereBlock(4)?.text == hereBlock(1)?.text)
+    check("the terminator is copied, at column 0 where a shell needs it",
+          hereBlock(1)?.text.hasSuffix("\nEOF") == true,
+          hereBlock(1).map { String($0.text.suffix(18)).debugDescription } ?? "nil")
+    check("the body keeps its own indentation",
+          hereBlock(1)?.text.contains("\n  name: stripe-api") == true)
+    check("what the command printed is not part of it",
+          hereBlock(1)?.text.contains("configured") == false)
+    check("and that output line is not a target of its own",
+          hereBlock(8) == nil)
+
+    // A TUI that runs commands for you echoes them behind a marker. Claude
+    // Code's bash mode uses `!`, and `!` pasted into an interactive shell is
+    // history expansion rather than the command that was on screen.
+    check("a bash-mode bang is a prompt",
+          CommandBlockDetector.strippingPrompt("! ssh host uptime") == "ssh host uptime")
+    check("and the command behind it is judged, not the bang",
+          CommandBlockDetector.looksLikeCommand("! ssh host uptime",
+                                                isExecutable: { $0 == "ssh" }))
+
+    let (bang, feedBang) = buffer(cols: 80, rows: 8)
+    feedBang("! ssh ovhprod-001 'kubectl -n snuggery get pvc -o jsonpath=\"{.a} {.b}\"'\r\n")
+    feedBang("2026-09-23T10:02:11Z [kubernetes.io/pvc-protection]\r\n")
+    let bangSnap = bang.snapshot()
+    let bangBlock = CommandBlockDetector.block(containingRow: 0, snapshot: bangSnap,
+                                               isExecutable: { $0 == "ssh" })
+    check("the bang is not copied with the command",
+          bangBlock?.text.hasPrefix("ssh ovhprod-001") == true,
+          bangBlock.map { String($0.text.prefix(24)).debugDescription } ?? "nil")
+    check("and what it printed is not either",
+          bangBlock?.text.contains("pvc-protection") == false)
+    check("braces inside a single-quoted argument do not leave it unfinished",
+          !CommandBlockDetector.isIncomplete(
+            "ssh h 'kubectl -o jsonpath=\"{.a} {.b}\"; echo'"))
+
+    // `at`, `test`, `time`, `make`, `find`, `date` are English words as well as
+    // commands, so a wrapped sentence can open with one. Inside a paragraph the
+    // name proves nothing; at the start of a block it is all there is to go on.
+    let isAt: (String) -> Bool = { $0 == "at" }
+    check("an English word that is also a command is not one mid-paragraph",
+          !CommandBlockDetector.looksLikeCommand(
+            "at ssh. The bang is how Claude Code showed the command it ran",
+            isExecutable: isAt, requiringSyntax: true))
+    check("the same name opening a block still counts",
+          CommandBlockDetector.looksLikeCommand("at 09:00 tomorrow", isExecutable: isAt))
+    check("and mid-paragraph it counts once there is shell in the line",
+          CommandBlockDetector.looksLikeCommand("at -f job.sh 09:00",
+                                                isExecutable: isAt, requiringSyntax: true))
+
+    let (prose, feedProse) = buffer(cols: 78, rows: 6)
+    feedProse("  ⌘-hover the command: it tints even though it wrapped, and the copy starts\r\n")
+    feedProse("  at ssh. The bang is how Claude Code showed the command it ran.\r\n")
+    check("a wrapped note is not a command block",
+          CommandBlockDetector.block(containingRow: 1, snapshot: prose.snapshot(),
+                                     isExecutable: isAt) == nil)
+}
+
 print("\n\(failures == 0 ? "all checks passed" : "\(failures) check(s) FAILED")")
 exit(failures == 0 ? 0 : 1)
