@@ -70,6 +70,20 @@ do {
     ufeed("日本語")
     check("double-width characters take two columns each",
           u.snapshot().cursorCol == 6, "cursor at \(u.snapshot().cursorCol)")
+
+    // An erase ending inside a wide glyph leaves one half behind. It is not
+    // half of a pair any more, so writing over it must not blank whatever
+    // was just printed beside it. The SGR between the letters is what a
+    // coloured prompt puts there, and keeps them apart however text is fed.
+    let (t, tfeed) = buffer(cols: 10, rows: 3)
+    tfeed("中\r\u{1b}[1Kg\u{1b}[mr")
+    check("a stray trailing half doesn't take the glyph before it",
+          row(t.snapshot(), 0) == "gr", "row 0 is \"\(row(t.snapshot(), 0))\"")
+
+    let (h, hfeed) = buffer(cols: 10, rows: 3)
+    hfeed("中\u{8}\u{1b}[Ka\rx")
+    check("a stray leading half doesn't take the glyph after it",
+          row(h.snapshot(), 0) == "xa", "row 0 is \"\(row(h.snapshot(), 0))\"")
 }
 
 section("scrollback")

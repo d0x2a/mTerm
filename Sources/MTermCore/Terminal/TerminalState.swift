@@ -740,14 +740,20 @@ package final class TerminalState: ParserSink {
 
     /// Overwriting half of a double-width pair strands the other half. Blank it
     /// so no fragment of the old glyph is left behind.
+    ///
+    /// Only when the other half is still there, though. An erase that ends
+    /// inside a wide glyph (`CSI 1K` with the cursor on its head) blanks the
+    /// head and leaves the tail, and a tail with nothing in front of it is
+    /// not a pair any more. Trusting the width alone, printing `gr` from that
+    /// head blanked the `g` as the `r` landed on the stray tail.
     private func clearOrphan(at col: Int) {
         guard col >= 0, col < cols else { return }
         let idx = rowBase(cursorRow) + col
         switch cells[idx].width {
         case 0:                                     // trailing half: head is left
-            if col > 0 { cells[idx - 1] = blankCell }
+            if col > 0, cells[idx - 1].width == 2 { cells[idx - 1] = blankCell }
         case 2:                                     // leading half: tail is right
-            if col + 1 < cols { cells[idx + 1] = blankCell }
+            if col + 1 < cols, cells[idx + 1].width == 0 { cells[idx + 1] = blankCell }
         default:
             break
         }
