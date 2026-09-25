@@ -191,6 +191,248 @@ do {
     }
 }
 
+section("screen capture")
+do {
+    /// A copy of `source` built from its capture, the way a second head gets
+    /// one: a fresh buffer of the same size and theme, fed the screen and
+    /// then whatever sequence `sourceParser` is partway through.
+    func mirror(of source: TerminalState, _ sourceParser: Parser) -> (TerminalState, Parser) {
+        let snap = source.snapshot()
+        let copy = TerminalState(cols: snap.cols, rows: snap.rows, scrollback: 100,
+                                 theme: source.theme)
+        let parser = Parser()
+        parser.sink = copy
+        (source.encodeScreen() + sourceParser.pendingSequence())
+            .withUnsafeBufferPointer { parser.feed(bytes: $0) }
+        return (copy, parser)
+    }
+
+    /// The first way `b` differs from `a` that anything could see, or nil.
+    /// Scrollback is not compared: it is history, and not in a capture.
+    func difference(_ a: TerminalState, _ b: TerminalState) -> String? {
+        let sa = a.snapshot(), sb = b.snapshot()
+        guard sa.cols == sb.cols, sa.rows == sb.rows else { return "size" }
+        if sa.cursorCol != sb.cursorCol || sa.cursorRow != sb.cursorRow {
+            return "cursor \(sa.cursorCol),\(sa.cursorRow) vs \(sb.cursorCol),\(sb.cursorRow)"
+        }
+        if sa.cursorVisible != sb.cursorVisible { return "cursor visibility" }
+        if sa.usingAlt != sb.usingAlt { return "alt screen" }
+        if sa.title != sb.title { return "title \"\(sa.title)\" vs \"\(sb.title)\"" }
+        if sa.currentDirectory != sb.currentDirectory { return "directory" }
+        let marks = { (s: TerminalSnapshot) in s.prompts.map { "\($0.viewportRow):\($0.exitCode ?? -1)" } }
+        if marks(sa) != marks(sb) { return "prompt marks \(marks(sa)) vs \(marks(sb))" }
+        if sa.rowWrapped != sb.rowWrapped { return "wrap flags \(sa.rowWrapped) vs \(sb.rowWrapped)" }
+        if a.bracketedPaste != b.bracketedPaste || a.reportFocus != b.reportFocus
+            || a.mouseTracking != b.mouseTracking || a.mouseEncoding != b.mouseEncoding
+            || a.alternateScroll != b.alternateScroll { return "modes" }
+        for r in 0 ..< sa.rows {
+            for c in 0 ..< sa.cols {
+                let x = sa.cells[((r + sa.rowOffset) % sa.rows) * sa.cols + c]
+                let y = sb.cells[((r + sb.rowOffset) % sb.rows) * sb.cols + c]
+                let lx = x.link == 0 ? "" : sa.links[Int(x.link) - 1]
+                let ly = y.link == 0 ? "" : sb.links[Int(y.link) - 1]
+                if x.scalar != y.scalar || x.fg != y.fg || x.bg != y.bg || x.attrs != y.attrs
+                    || x.width != y.width || lx != ly {
+                    func show(_ z: Cell, _ l: String) -> String {
+                        "\"\(z.scalar)\" w\(z.width) fg\(String(z.fg.value, radix: 16)) bg\(String(z.bg.value, radix: 16)) a\(z.attrs.rawValue) \(l)"
+                    }
+                    return "cell \(c),\(r): \(show(x, lx)) vs \(show(y, ly))"
+                }
+            }
+        }
+        return nil
+    }
+
+    func feed(_ parser: Parser, _ text: String) {
+        Array(text.utf8).withUnsafeBufferPointer { parser.feed(bytes: $0) }
+    }
+
+    /// Builds a screen from `setup`, mirrors it, then sends `after` to both.
+    func roundTrip(cols: Int = 10, rows: Int = 4, _ setup: String,
+                   then after: String = "") -> String? {
+        let (s, _) = buffer(cols: cols, rows: rows)
+        let p = Parser()
+        p.sink = s
+        feed(p, setup)
+        let (m, mp) = mirror(of: s, p)
+        if let d = difference(s, m) { return "on capture: \(d)" }
+        guard !after.isEmpty else { return nil }
+        feed(p, after)
+        feed(mp, after)
+        return difference(s, m).map { "after: \($0)" }
+    }
+
+    let esc = "\u{1b}"
+    var d = roundTrip(cols: 40, rows: 3,
+        "\(esc)[1;31mred\(esc)[0m \(esc)[7minv\(esc)[27m \(esc)[2;3;4mfaint\(esc)[0m 日本 😀 e\u{0301} "
+        + "\(esc)]8;;https://a.test/\u{07}link\(esc)]8;;\u{07}\r\n\(esc)[48;5;22m\(esc)[Kband "
+        + "\(esc)[38;2;1;2;3mrgb")
+    check("colours, attributes, wide glyphs and links come back cell for cell", d == nil, d ?? "")
+
+    d = roundTrip("primary\r\n\(esc)[32mpen\(esc)[?1049halt screen\(esc)7",
+                  then: "\(esc)8saved\(esc)[?1049lback")
+    check("the primary screen behind the alt screen comes back, with its cursor and pen",
+          d == nil, d ?? "")
+
+    d = roundTrip("0123456789", then: "Z")
+    check("a wrap pending at the right edge still wraps", d == nil, d ?? "")
+
+    d = roundTrip(rows: 6, "\(esc)[2;4r\(esc)[?6h\(esc)[2;3Hx",
+                  then: "\(esc)[Hhome\n\n\n\nscrolled")
+    check("margins and origin mode put the next cursor move where the original's goes",
+          d == nil, d ?? "")
+
+    d = roundTrip("\(esc)[3;5H\(esc)[1;32m\(esc)]8;;https://s.test/\u{07}\(esc)7\(esc)[0m\(esc)]8;;\u{07}\(esc)[H",
+                  then: "\(esc)8saved")
+    check("the DECSC slot survives, pen and link with it", d == nil, d ?? "")
+
+    d = roundTrip(
+        "\(esc)[1;3H中\(esc)[1;3H\(esc)[1K"            // right half left alone, mid-row
+        + "\(esc)[1;6H中\(esc)[1;7H\(esc)[K"            // left half left alone, mid-row
+        + "\(esc)[2;9H中\(esc)[2;9H\(esc)[1K"           // right half in the last column
+        + "\(esc)[3;8H中\(esc)[3;1H\(esc)[2@"           // left half pushed into the last column
+        + "\(esc)[4;1H中\(esc)[4;1H\(esc)[P",           // right half slid into column 0
+        then: "\(esc)[1;1Hab\(esc)[1;6Hcd")
+    check("stray halves of wide glyphs come back where they were", d == nil, d ?? "")
+
+    d = roundTrip(cols: 20, rows: 4,
+        "\(esc)]133;A\u{07}$ ls\r\n\(esc)]133;D;1\u{07}\(esc)]133;A\u{07}$ "
+        + "\(esc)]2;hello\u{07}\(esc)]7;file:///tmp/a%20b\u{07}")
+    check("prompt marks, the title and the directory come back", d == nil, d ?? "")
+
+    d = roundTrip(cols: 20, "before \(esc)[3", then: "1mred")
+    check("a capture taken inside an escape sequence finishes it", d == nil, d ?? "")
+    do {
+        let (s, _) = buffer(cols: 20, rows: 2)
+        let p = Parser()
+        p.sink = s
+        ([0x61, 0xE6] as [UInt8]).withUnsafeBufferPointer { p.feed(bytes: $0) }
+        let (m, mp) = mirror(of: s, p)
+        ([0x97, 0xA5, 0x62] as [UInt8]).withUnsafeBufferPointer { p.feed(bytes: $0); mp.feed(bytes: $0) }
+        let diff = difference(s, m)
+        check("a capture taken inside a UTF-8 character finishes it",
+              diff == nil && row(m.snapshot(), 0) == "a日b", diff ?? row(m.snapshot(), 0))
+    }
+
+    // Why a resize reaches a mirror as a fresh capture rather than as a size:
+    // widening rejoins a wrapped line across the top of the screen, pulling
+    // its start back out of history — which a copy that attached later never
+    // had. Resized itself, the copy below would begin "KLMNOPQRST".
+    do {
+        let (s, _) = buffer(cols: 10, rows: 3)
+        let p = Parser()
+        p.sink = s
+        feed(p, "abcdefghijKLMNOPQRSTuvwxyz0123456789")
+        s.resize(cols: 30, rows: 3)
+        let (m, _) = mirror(of: s, p)
+        let diff = difference(s, m)
+        check("after a resize, a fresh capture has the line rejoined from history",
+              diff == nil && row(m.snapshot(), 0) == "abcdefghijKLMNOPQRSTuvwxyz0123",
+              diff ?? row(m.snapshot(), 0))
+    }
+
+    // A second head attaching at any moment: a mirror started between any
+    // two reads of a stream, then fed every read after it, has to end up
+    // identical to the original. Everything a program can do to the grid is
+    // in the stream — including leaving halves of wide glyphs behind, which
+    // is where drawing a screen back is hardest.
+    var seed: UInt64 = 0xD1B5_4A32_D192_ED03
+    func next(_ n: Int) -> Int {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
+        return Int(seed % UInt64(n))
+    }
+    func sgr() -> String {
+        let parts = ["0", "1", "2", "3", "4", "7", "22", "27", "39", "49",
+                     "3\(next(8))", "4\(next(8))", "9\(next(8))", "10\(next(8))",
+                     "38;5;\(next(256))", "48;5;\(next(256))",
+                     "38;2;\(next(256));\(next(256));\(next(256))",
+                     "48;2;\(next(256));\(next(256));\(next(256))"]
+        return "\(esc)[" + (0 ... next(3)).map { _ in parts[next(parts.count)] }.joined(separator: ";") + "m"
+    }
+    let words = ["the", "grid", "x", "a=b", "~/src", "longerthanthenarrowestgrid"]
+    var text = ""
+    while text.utf8.count < 40_000 {
+        switch next(34) {
+        case 0: text += "\(esc)[\(1 + next(8));\(1 + next(90))H"
+        case 1: text += ["日本語", "한", "😀", "e\u{0301}", "ｆｕ", "中"][next(6)]
+        case 2: text += "\r"
+        case 3: text += "\n"
+        case 4: text += "\u{8}"
+        case 5: text += "\t"
+        case 6: text += "\(esc)[\(next(3))K"
+        case 7: text += "\(esc)[\(next(4))J"
+        case 8: text += "\(esc)[\(1 + next(3))X"
+        case 9: text += "\(esc)[\(1 + next(3))P"
+        case 10: text += "\(esc)[\(1 + next(3))@"
+        case 11: text += "\(esc)[\(1 + next(2))L"
+        case 12: text += "\(esc)[\(1 + next(2))M"
+        case 13: text += "\(esc)[\(1 + next(2))S"
+        case 14: text += "\(esc)[\(1 + next(2))T"
+        case 15: text += next(3) == 0 ? "\(esc)[r" : "\(esc)[\(1 + next(3));\(3 + next(5))r"
+        case 16: text += "\(esc)[?6" + (next(2) == 0 ? "h" : "l")
+        case 17: text += "\(esc)[?7" + (next(2) == 0 ? "h" : "l")
+        case 18: text += "\(esc)[?25" + (next(2) == 0 ? "h" : "l")
+        case 19: text += ["\(esc)[?1049h", "\(esc)[?1049l", "\(esc)[?1047h", "\(esc)[?1047l",
+                          "\(esc)[?1048h", "\(esc)[?1048l"][next(6)]
+        case 20: text += ["\(esc)7", "\(esc)8", "\(esc)[s", "\(esc)[u"][next(4)]
+        case 21: text += ["\(esc)(0", "\(esc)(B", "\(esc))0", "\(esc))B", "\u{0e}", "\u{0f}"][next(6)]
+        case 22: text += next(2) == 0 ? "\(esc)H" : "\(esc)[\(next(2) == 0 ? 0 : 3)g"
+        case 23: text += "\(esc)]8;;https://x.test/\(next(5))\u{07}"
+        case 24: text += "\(esc)]8;;\u{07}"
+        case 25: text += "\(esc)]2;title \(next(9))\u{07}"
+        case 26: text += "\(esc)]7;file:///tmp/dir\(next(9))\u{07}"
+        case 27: text += next(2) == 0 ? "\(esc)]133;A\u{07}" : "\(esc)]133;D;\(next(3))\u{07}"
+        case 28: text += ["\(esc)[?1000h", "\(esc)[?1002h", "\(esc)[?1003h", "\(esc)[?9h",
+                          "\(esc)[?1000l", "\(esc)[?1006h", "\(esc)[?1006l", "\(esc)[?1004h",
+                          "\(esc)[?2004h", "\(esc)[?1007l", "\(esc)[?1007h"][next(11)]
+        case 29, 30: text += sgr()
+        case 31: text += ["\(esc)M", "\(esc)D", "\(esc)E"][next(3)]
+        case 32:
+            text += ["日本語", "한", "😀", "ｆｕ"][next(4)] + "\u{8}\u{8}"
+            if next(2) == 0 { text += "\(esc)[1K" }
+            text += words[next(words.count)]
+        default: text += words[next(words.count)] + String(repeating: "q", count: next(40))
+        }
+    }
+    let stream = Array(text.utf8)
+    let probe = "\(esc)8restored\t|\t|\u{0e}qqq\u{0f}qqq\(esc)[Hhome\(esc)[2S"
+        + String(repeating: "w", count: 30) + "\(esc)[?1047lprimary\(esc)[?6l\(esc)[Hend"
+
+    for (cols, rows) in [(80, 6), (13, 5), (2, 3)] {
+        let (source, _) = buffer(cols: cols, rows: rows)
+        let sourceParser = Parser()
+        sourceParser.sink = source
+        var mirrors: [(state: TerminalState, parser: Parser, from: Int)] = []
+        var problems: [String] = []
+        stream.withUnsafeBufferPointer { buf in
+            var off = 0, chunk = 0
+            while off < buf.count {
+                if chunk % 6 == 0 {
+                    let (m, mp) = mirror(of: source, sourceParser)
+                    if let d = difference(source, m) { problems.append("capture at read \(chunk): \(d)") }
+                    mirrors.append((m, mp, chunk))
+                }
+                let n = min(1 + next(700), buf.count - off)
+                let read = UnsafeBufferPointer(start: buf.baseAddress! + off, count: n)
+                sourceParser.feed(bytes: read)
+                for m in mirrors { m.parser.feed(bytes: read) }
+                off += n
+                chunk += 1
+            }
+        }
+        for m in mirrors {
+            if let d = difference(source, m.state) { problems.append("mirror from read \(m.from): \(d)") }
+        }
+        feed(sourceParser, probe)
+        for m in mirrors {
+            feed(m.parser, probe)
+            if let d = difference(source, m.state) { problems.append("mirror from read \(m.from), after the probe: \(d)") }
+        }
+        check("\(mirrors.count) mirrors started across a mixed stream end identical to it at \(cols) columns",
+              problems.isEmpty, problems.isEmpty ? "" : "\(problems.count) problems; first: \(problems[0])")
+    }
+}
+
 section("scrollback")
 do {
     let (s, feed) = buffer(cols: 20, rows: 3, scrollback: 100)

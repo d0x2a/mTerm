@@ -120,6 +120,9 @@ package final class Parser {
 
     private var utf8Partial: UInt32 = 0
     private var utf8Remaining: Int = 0
+    /// The length the lead byte announced, which `pendingSequence` needs to
+    /// know how many bytes `utf8Partial` holds. Set on lead bytes only.
+    private var utf8Length: Int = 0
 
     package func feed(bytes: UnsafeBufferPointer<UInt8>) {
         guard let base = bytes.baseAddress else { flushDCS(); return }
@@ -148,6 +151,57 @@ package final class Parser {
         // Whatever payload this chunk ended mid-stream. The terminator path
         // flushes itself, before it reports the end.
         flushDCS()
+    }
+
+    /// The bytes that bring a fresh parser to where this one is: partway
+    /// through an escape sequence or a UTF-8 character, or nothing at all.
+    ///
+    /// Something that copies a buffer between reads needs this as well as the
+    /// grid. A read ends wherever the kernel cut it, often inside a sequence,
+    /// and the rest of that sequence arrives at the start of the next read —
+    /// which a parser starting from the ground state would print as text.
+    /// Rebuilt from what the parser kept rather than the bytes it saw: `CSI 03`
+    /// comes back as `CSI 3`, which means the same thing.
+    package func pendingSequence() -> [UInt8] {
+        func csiBody() -> [UInt8] {
+            var out: [UInt8] = []
+            if let marker { out.append(marker) }
+            for p in params { out += Array(String(p).utf8); out.append(0x3B) }
+            if let currentParam { out += Array(String(currentParam).utf8) }
+            out += intermediates
+            return out
+        }
+        switch state {
+        case .ground:
+            guard utf8Remaining > 0 else { return [] }
+            let consumed = utf8Length - utf8Remaining
+            let lead: UInt8 = utf8Length == 2 ? 0xC0 : utf8Length == 3 ? 0xE0 : 0xF0
+            var out = [lead | UInt8(truncatingIfNeeded: utf8Partial >> (6 * (consumed - 1)))]
+            for i in 1 ..< max(1, consumed) {
+                out.append(0x80 | UInt8(truncatingIfNeeded: (utf8Partial >> (6 * (consumed - 1 - i))) & 0x3F))
+            }
+            return out
+        case .escape:
+            return [0x1B] + intermediates
+        case .csiEntry:
+            return [0x1B, 0x5B]
+        case .csiParam:
+            return [0x1B, 0x5B] + csiBody()
+        case .csiIgnore:
+            return [0x1B, 0x5B, 0x3C, 0x3C]             // a second marker is ignored to the end
+        case .osc:
+            return [0x1B, 0x5D] + oscBuffer
+        case .dcsEntry:
+            return [0x1B, 0x50] + csiBody()
+        case .dcsPassthrough:
+            // The final byte isn't kept once the introducer is dispatched;
+            // any will do to swallow the rest of the payload.
+            return [0x1B, 0x50] + csiBody() + [0x70]
+        case .dcsIgnore:
+            return [0x1B, 0x5F]
+        case .windowName:
+            return [0x1B, 0x6B] + stringBuffer
+        }
     }
 
     private func flushDCS() {
@@ -199,12 +253,15 @@ package final class Parser {
             if b & 0b1110_0000 == 0b1100_0000 {
                 utf8Partial = UInt32(b & 0b0001_1111)
                 utf8Remaining = 1
+                utf8Length = 2
             } else if b & 0b1111_0000 == 0b1110_0000 {
                 utf8Partial = UInt32(b & 0b0000_1111)
                 utf8Remaining = 2
+                utf8Length = 3
             } else if b & 0b1111_1000 == 0b1111_0000 {
                 utf8Partial = UInt32(b & 0b0000_0111)
                 utf8Remaining = 3
+                utf8Length = 4
             } else {
                 sink?.parserPrint(Unicode.Scalar(0xFFFD)!)
             }

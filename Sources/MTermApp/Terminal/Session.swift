@@ -20,10 +20,26 @@ protocol SessionTransport: AnyObject {
 package enum SessionMirrorEvent {
     /// Bytes the parser has just been fed. Only valid during the call.
     case output(UnsafeBufferPointer<UInt8>)
-    /// The grid was resized, and reflowed unless it is a tmux pane's.
-    case resize(cols: Int, rows: Int)
+    /// The grid was resized, so here it is again, whole: start the copy over
+    /// from this. Resizing a copy instead would reflow it, and reflow rejoins
+    /// lines across the top of the screen from history the copy doesn't have.
+    case resize(SessionCapture)
     /// Colours already on the grid were remapped from one theme to the other.
     case themeChange(from: Theme, to: Theme)
+}
+
+/// A session's screen as the bytes that draw it, for `Session.mirror`: parsed
+/// into a fresh `TerminalState` of this size and theme, they leave it
+/// indistinguishable from the session's own. See `GridEncoder`.
+package struct SessionCapture {
+    package let cols: Int
+    package let rows: Int
+    /// The theme the bytes' default colours mean: the session's own at the
+    /// time, which a theme remap changes.
+    package let theme: Theme
+    /// The screen, then whatever escape sequence the last read left half
+    /// finished, so the bytes that follow finish it on the copy too.
+    package let bytes: [UInt8]
 }
 
 /// A standing `Session.mirror` request. It ends when cancelled or released.
@@ -385,23 +401,30 @@ package final class Session: TmuxCommandSink, TmuxPaneSink {
     /// its own copy of the grid, which needs the grid as it stands and then
     /// every change after it, with nothing missed or repeated in between.
     ///
-    /// `start` runs first, on the session queue, with the grid as of that
-    /// moment: the place to capture it. From then on `event` hears every
-    /// change, in order, on the same queue — bytes as they are parsed, and the
-    /// two changes that don't come as bytes, a resize and a theme remap —
-    /// until the returned mirror is cancelled or released. Both run where
-    /// parsing does, so they have to be quick and must not call back into
-    /// this session synchronously.
-    package func mirror(start: @escaping (TerminalState) -> Void,
+    /// `start` runs first, on the session queue, with the screen captured at
+    /// that moment. From then on `event` hears every change, in order, on the
+    /// same queue — bytes as they are parsed, and the two changes that don't
+    /// come as bytes: a resize, which arrives as a fresh capture to start
+    /// over from, and a theme remap — until the returned mirror is cancelled
+    /// or released. Both run where parsing does, so they have to
+    /// be quick and must not call back into this session synchronously.
+    package func mirror(start: @escaping (SessionCapture) -> Void,
                         event: @escaping (SessionMirrorEvent) -> Void) -> SessionMirror {
         let mirror = SessionMirror(session: self)
         let key = ObjectIdentifier(mirror)
         queue.async { [weak self] in
             guard let self else { return }
-            start(self.state)
+            start(self.capture())
             self.mirrors[key] = event
         }
         return mirror
+    }
+
+    /// Session-queue only.
+    private func capture() -> SessionCapture {
+        let size = state.snapshot()
+        return SessionCapture(cols: size.cols, rows: size.rows, theme: state.screenTheme,
+                              bytes: state.encodeScreen() + parser.pendingSequence())
     }
 
     /// Queued behind whatever the mirror might still be in the middle of, so
@@ -448,7 +471,7 @@ package final class Session: TmuxCommandSink, TmuxPaneSink {
         queue.async { [weak self] in
             guard let self else { return }
             self.state.resize(cols: cols, rows: rows)
-            self.sendToMirrors(.resize(cols: cols, rows: rows))
+            if !self.mirrors.isEmpty { self.sendToMirrors(.resize(self.capture())) }
             self.publish()
         }
         if let pty {

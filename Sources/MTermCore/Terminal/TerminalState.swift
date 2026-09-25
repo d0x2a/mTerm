@@ -570,6 +570,45 @@ package final class TerminalState: ParserSink {
         viewportSnapshot(scrollOffset: 0)
     }
 
+    /// Everything `GridEncoder` needs, copied out. Here rather than beside
+    /// the encoder because most of it is private to this file.
+    func screenCapture() -> ScreenCapture {
+        func uri(_ id: UInt16) -> String? {
+            id == 0 || Int(id) > linkURIs.count ? nil : linkURIs[Int(id) - 1]
+        }
+        var screen: [Cell] = []
+        screen.reserveCapacity(cols * rows)
+        for r in 0..<rows { screen.append(contentsOf: cells[rowBase(r) ..< rowBase(r) + cols]) }
+        let screenWrapped = (0..<rows).map { rowWrapped[ringRow($0)] }
+        let pen = ScreenCapture.Pen(fg: currentFg, bg: currentBg, attrs: currentAttrs,
+                                    link: uri(currentLink))
+        return ScreenCapture(
+            cols: cols, rows: rows,
+            defaultFg: defaultFg, defaultBg: defaultBg,
+            primary: usingAlt ? stashedCells : screen,
+            primaryWrapped: usingAlt ? stashedRowWrapped : screenWrapped,
+            alt: usingAlt ? (screen, screenWrapped) : nil,
+            primaryCursor: usingAlt ? stashedCursor : (cursorCol, cursorRow),
+            primaryPen: usingAlt
+                ? ScreenCapture.Pen(fg: stashedFg, bg: stashedBg, attrs: stashedAttrs,
+                                    link: uri(stashedLink))
+                : pen,
+            cursor: (cursorCol, cursorRow), cursorVisible: cursorVisible, pen: pen,
+            savedCursor: savedCursor,
+            savedPen: ScreenCapture.Pen(fg: savedFg, bg: savedBg, attrs: savedAttrs,
+                                        link: uri(savedLink)),
+            links: linkURIs,
+            charsets: charsets, activeCharset: activeCharset,
+            tabStops: tabStops, defaultTabStops: Self.defaultTabStops(cols: cols),
+            title: title, currentDirectory: currentDirectory,
+            autoWrap: autoWrap, originMode: originMode,
+            mouseTracking: mouseTracking, mouseEncoding: mouseEncoding,
+            reportFocus: reportFocus, bracketedPaste: bracketedPaste,
+            alternateScroll: alternateScroll,
+            scrollTop: scrollTop, scrollBottom: scrollBottom,
+            prompts: visiblePrompts(offset: 0))
+    }
+
     /// Composes a `rows`-tall viewport. With scrollOffset=0 the viewport is the
     /// active grid. With scrollOffset>0 the top N rows come from scrollback.
     package func viewportSnapshot(scrollOffset requested: Int) -> TerminalSnapshot {
