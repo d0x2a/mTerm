@@ -1126,5 +1126,91 @@ do {
                                      isExecutable: isAt) == nil)
 }
 
+section("coloured runs")
+do {
+    // Every case here is a byte stream seen in the wild or copied from it:
+    // what Claude Code prints for a quoted draft, and what `ls -G` prints.
+    let fg = PackedColor(ThemeStore.currentTheme.foreground)
+    func run(_ s: TerminalSnapshot, _ col: Int, _ row: Int) -> ColorRun? {
+        ColorRunDetector.run(at: (col, row), snapshot: s, defaultForeground: fg)
+    }
+    let accent = "\u{1b}[38;2;87;105;247m", plain = "\u{1b}[39m"
+    // Claude Code colours each word and leaves the spaces between them in the
+    // default colour — a space's foreground never shows.
+    func perWord(_ line: String) -> String {
+        line.split(separator: " ").map { "\(accent)\($0)\(plain)" }.joined(separator: " ")
+    }
+
+    // A draft Claude Code wrapped itself at 38 columns of a 40-column screen:
+    // three rows with no wrap flag between them.
+    let (draft, feedDraft) = buffer(cols: 40, rows: 6)
+    feedDraft("\u{1b}[1mdescribe\u{1b}[22m (99 of 100)\r\n")
+    feedDraft("  \(perWord("mTerm is a native macOS terminal"))\r\n")
+    feedDraft("  \(perWord("emulator with an AppKit interface and"))\r\n")
+    feedDraft("  \(perWord("a Metal renderer."))\r\n")
+    feedDraft("  see \(accent)Sources\(plain) for more\r\n")
+    let whole = "mTerm is a native macOS terminal emulator with an AppKit interface and a Metal renderer."
+    let ds = draft.snapshot()
+    check("a word of a wrapped draft copies the whole draft", run(ds, 12, 2)?.text == whole,
+          run(ds, 12, 2)?.text ?? "nil")
+    check("as one segment per row", run(ds, 12, 2)?.segments.count == 3)
+    check("the default-coloured space between two words is part of it",
+          run(ds, 7, 1)?.text == whole)
+    check("a coloured word inside plain prose copies alone", run(ds, 8, 4)?.text == "Sources")
+    check("plain text is not a target", run(ds, 3, 4) == nil)
+    check("nor the padding past a draft", run(ds, 30, 3) == nil)
+
+    // `ls -1`: short rows of the same colour weren't wrapped, so they stay apart.
+    let (column, feedColumn) = buffer(cols: 40, rows: 4)
+    feedColumn("\(accent)Sources\(plain)\r\n\(accent)docs\(plain)\r\n\(accent)scripts\(plain)\r\n")
+    check("a column of names copies one name", run(column.snapshot(), 1, 1)?.text == "docs")
+
+    // `ls -G -C`, byte for byte: one space after the longest name, and a
+    // wider gap between the others, which is what gives the columns away.
+    let (listing, feedListing) = buffer(cols: 80, rows: 2)
+    let dir = "\u{1b}[1m\u{1b}[36m", end = "\u{1b}[39;49m\u{1b}[0m"
+    feedListing("\(dir)CMTermBridge\(end) \(dir)mTerm\(end)        \(dir)MTermApp\(end)\r\n")
+    let ls = listing.snapshot()
+    check("ls columns don't bridge the single space after the longest name",
+          run(ls, 3, 0)?.text == "CMTermBridge", run(ls, 3, 0)?.text ?? "nil")
+    check("and that space is not a target", run(ls, 12, 0) == nil)
+
+    // The rule Claude Code draws across the window is full width, so it
+    // passes the fit test; it must not fuse with the grey line under it.
+    let (rule, feedRule) = buffer(cols: 20, rows: 3)
+    let grey = "\u{1b}[38;2;153;153;153m"
+    feedRule("\(grey)\(String(repeating: "─", count: 20))\(plain)\r\n\(grey)⎿ Allowed\(plain)\r\n")
+    check("a rule is not a target", run(rule.snapshot(), 5, 0) == nil)
+    check("nor fused with the line under it", run(rule.snapshot(), 3, 1)?.text == "⎿ Allowed")
+
+    // A row of a coloured paragraph can open with a command's name. The
+    // paragraph wins when it covers the block; a command coloured token by
+    // token stays a command.
+    let (mixed, feedMixed) = buffer(cols: 40, rows: 4)
+    feedMixed("\u{1b}[32mgit\(plain) log --oneline -n 5\r\n")
+    let ms = mixed.snapshot()
+    if let r = run(ms, 1, 0) {
+        check("a green command name doesn't cover its command",
+              !ColorRunDetector.run(r, covers: 0...0, in: ms))
+    } else {
+        check("a green command name is a run", false)
+    }
+    if let r = run(ds, 12, 2) {
+        check("a draft covers each of its rows", ColorRunDetector.run(r, covers: 1...3, in: ds))
+    }
+
+    // Headings that open with something on $PATH.
+    let onPath: (String) -> Bool = { ["who", "time", "find", "open"].contains($0) }
+    check("\"who is this for\" is prose",
+          !CommandBlockDetector.looksLikeCommand("who is this for / when to use it (262 of 60–300)",
+                                                 isExecutable: onPath))
+    check("\"time to ship\" is prose",
+          !CommandBlockDetector.looksLikeCommand("time to ship", isExecutable: onPath))
+    check("`who am i` is still a command",
+          CommandBlockDetector.looksLikeCommand("who am i", isExecutable: onPath))
+    check("`open .` is still a command",
+          CommandBlockDetector.looksLikeCommand("open .", isExecutable: onPath))
+}
+
 print("\n\(failures == 0 ? "all checks passed" : "\(failures) check(s) FAILED")")
 exit(failures == 0 ? 0 : 1)

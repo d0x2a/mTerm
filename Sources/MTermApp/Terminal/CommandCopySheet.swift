@@ -32,12 +32,6 @@ final class CommandCopySheet {
     private var document: NSView?
     private var keyMonitor: Any?
 
-    private static let boxWidth: CGFloat = 480
-    private static let inset: CGFloat = 10
-    /// Fixed, so the sheet doesn't resize under the pointer each time an edge
-    /// moves. Anything longer scrolls.
-    private static let visibleLines = 6
-
     init(lines: [CommandBlockDetector.LogicalLine],
          span: ClosedRange<Int>,
          theme: Theme,
@@ -142,65 +136,21 @@ final class CommandCopySheet {
         bottom.setEnabled(span.upperBound < lines.count - 1, forSegment: 0)
         bottom.setEnabled(span.upperBound > span.lowerBound, forSegment: 1)
 
-        // Re-lay the text and grow the scrolled document to match, so a
-        // command longer than the box scrolls instead of being clipped.
-        let width = Self.boxWidth - Self.inset * 2
-        let fitted = command.sizeThatFits(NSSize(width: width, height: .greatestFiniteMagnitude))
-        command.frame = NSRect(x: Self.inset, y: Self.inset, width: width, height: fitted.height)
-        if let document {
-            let height = max(document.superview?.frame.height ?? 0, fitted.height + Self.inset * 2)
-            document.frame = NSRect(x: 0, y: 0, width: Self.boxWidth, height: height)
-        }
+        if let document { CopyPreview.fit(command, in: document) }
 
         extentChanged(lines[span.lowerBound].firstRow...lines[span.upperBound].lastRow)
     }
 
     // MARK: - building
 
-    private func color(_ c: SIMD4<Float>) -> NSColor {
-        NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1)
-    }
-
     private func buildAccessory() -> NSView {
-        let width = Self.boxWidth
-        let settings = ThemeStore.shared.settings
-        let font = FontCatalog.makeFont(family: settings.fontFamily,
-                                        size: settings.fontSize,
-                                        scale: 1)
-
-        // A label, not a text view: a text view takes first responder when the
-        // sheet opens and then Return goes to it rather than to Copy.
-        command.isSelectable = false
-        command.refusesFirstResponder = true
-        command.isBezeled = false
-        command.drawsBackground = false
-        command.font = font
-        command.textColor = color(theme.foreground)
-        command.maximumNumberOfLines = 0
-        command.lineBreakMode = .byWordWrapping
-        command.preferredMaxLayoutWidth = width - Self.inset * 2
-        command.translatesAutoresizingMaskIntoConstraints = true
-
-        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
-        let boxHeight = ceil(lineHeight * CGFloat(Self.visibleLines)) + Self.inset * 2
-
-        // Flipped, so the command starts at the top of the box rather than
-        // sitting on its floor.
-        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: boxHeight))
-        document.addSubview(command)
+        let width = CopyPreview.width
+        let (box, document) = CopyPreview.make(showing: command,
+                                               in: theme,
+                                               textColor: theme.foreground,
+                                               height: .lines(6))
         self.document = document
-
-        let box = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: boxHeight))
-        box.documentView = document
-        box.drawsBackground = true
-        box.backgroundColor = color(theme.background)
-        box.hasVerticalScroller = true
-        box.autohidesScrollers = true
-        box.wantsLayer = true
-        box.layer?.cornerRadius = 6
-        box.layer?.masksToBounds = true
-        box.layer?.borderWidth = 1
-        box.layer?.borderColor = color(theme.foreground).withAlphaComponent(0.15).cgColor
+        let boxHeight = box.frame.height
 
         top = NSSegmentedControl(labels: ["↑", "↓"], trackingMode: .momentary,
                                  target: self, action: #selector(topChanged(_:)))
@@ -259,6 +209,95 @@ final class CommandCopySheet {
         field.refusesFirstResponder = true
         field.sizeToFit()
         return field
+    }
+}
+
+/// The box a copy sheet shows its text in: the terminal's own font and
+/// background, so what's about to be copied looks the way it did on screen.
+enum CopyPreview {
+    static let width: CGFloat = 480
+    static let inset: CGFloat = 10
+
+    enum Height {
+        /// This many lines, scrolling past that. For text that changes while
+        /// the sheet is up: a box that resized as it did would move the
+        /// controls under the pointer.
+        case lines(Int)
+        /// Tall enough for the label's text as it stands, so nothing scrolls
+        /// — up to `max`, past which the sheet would run off the screen.
+        case fitting(max: CGFloat)
+    }
+
+    static func color(_ c: SIMD4<Float>) -> NSColor {
+        NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1)
+    }
+
+    /// The box, and the scrolled document `label` sits in — which `fit`
+    /// needs whenever the label's text changes. For `.fitting`, set the
+    /// label's text first.
+    static func make(showing label: NSTextField,
+                     in theme: Theme,
+                     textColor: SIMD4<Float>,
+                     height: Height) -> (box: NSScrollView, document: NSView) {
+        let settings = ThemeStore.shared.settings
+        let font = FontCatalog.makeFont(family: settings.fontFamily,
+                                        size: settings.fontSize,
+                                        scale: 1)
+
+        // A label, not a text view: a text view takes first responder when the
+        // sheet opens and then Return goes to it rather than to Copy.
+        label.isSelectable = false
+        label.refusesFirstResponder = true
+        label.isBezeled = false
+        label.drawsBackground = false
+        label.font = font
+        label.textColor = color(textColor)
+        label.maximumNumberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.preferredMaxLayoutWidth = width - inset * 2
+        label.translatesAutoresizingMaskIntoConstraints = true
+
+        let boxHeight: CGFloat
+        switch height {
+        case .lines(let n):
+            let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+            boxHeight = ceil(lineHeight * CGFloat(n)) + inset * 2
+        case .fitting(let limit):
+            let fitted = label.sizeThatFits(NSSize(width: width - inset * 2,
+                                                   height: .greatestFiniteMagnitude))
+            boxHeight = min(ceil(fitted.height) + inset * 2, limit)
+        }
+
+        // Flipped, so the text starts at the top of the box rather than
+        // sitting on its floor.
+        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: boxHeight))
+        document.addSubview(label)
+
+        let box = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: boxHeight))
+        box.documentView = document
+        // The layer draws the border. A bezel would also take two points
+        // off the clip view, and a box sized to fit would scroll by them.
+        box.borderType = .noBorder
+        box.drawsBackground = true
+        box.backgroundColor = color(theme.background)
+        box.hasVerticalScroller = true
+        box.autohidesScrollers = true
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 6
+        box.layer?.masksToBounds = true
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = color(theme.foreground).withAlphaComponent(0.15).cgColor
+        return (box, document)
+    }
+
+    /// Re-lays the text and grows the scrolled document to match, so text
+    /// longer than the box scrolls instead of being clipped.
+    static func fit(_ label: NSTextField, in document: NSView) {
+        let textWidth = width - inset * 2
+        let fitted = label.sizeThatFits(NSSize(width: textWidth, height: .greatestFiniteMagnitude))
+        label.frame = NSRect(x: inset, y: inset, width: textWidth, height: fitted.height)
+        let height = max(document.superview?.frame.height ?? 0, fitted.height + inset * 2)
+        document.frame = NSRect(x: 0, y: 0, width: width, height: height)
     }
 }
 

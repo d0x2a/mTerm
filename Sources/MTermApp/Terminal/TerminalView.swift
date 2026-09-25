@@ -151,6 +151,10 @@ final class TerminalView: NSView, CALayerDelegate {
     /// whether or not ⌘ is still held — the sheet is the affordance now.
     private var pendingCopyExtent: ClosedRange<Int>?
     private var copySheet: CommandCopySheet?
+    /// The same for a coloured run: marked behind its sheet until it closes.
+    private var pendingCopyRun: ColorRun?
+    private var runCopySheet: RunCopySheet?
+    private static let runTintAlpha: Float = 0.18
     /// Memo for evaluateTriggers. Kept separate from currentTriggerMatches,
     /// which is cleared whenever ⌘ comes up — reusing that as the memo would
     /// hand back an empty result the next time ⌘ went down on an unchanged
@@ -391,9 +395,15 @@ final class TerminalView: NSView, CALayerDelegate {
             }
             if let session {
                 let snapshot = session.snapshot(scrollOffset: scrollOffset)
-                if let block = commandBlock(at: coord, snapshot: snapshot) {
+                switch copyTarget(at: coord, snapshot: snapshot) {
+                case .block(let block):
                     confirmCopy(block, snapshot: snapshot)
                     return                   // don't start a selection
+                case .run(let run):
+                    confirmCopy(run)
+                    return                   // don't start a selection
+                case nil:
+                    break
                 }
             }
         }
@@ -639,18 +649,42 @@ final class TerminalView: NSView, CALayerDelegate {
         return bands
     }
 
-    // MARK: command blocks
+    // MARK: copy targets
 
-    /// The command block under the pointer, or nil when there isn't one.
+    /// What ⌘-click copies, once links have had their turn.
+    private enum CopyTarget {
+        case block(CommandBlock)
+        case run(ColorRun)
+    }
+
+    /// The copy target under the pointer, or nil when there isn't one.
     ///
     /// A link wins wherever it matches: it is the narrower target, and it is
     /// the one ⌘-click already had a meaning for.
-    private func hoveredCommandBlock(snapshot: TerminalSnapshot) -> CommandBlock? {
+    private func hoveredCopyTarget(snapshot: TerminalSnapshot) -> CopyTarget? {
         guard commandHeld, let point = lastMouseWindowPoint else { return nil }
         let coord = cellCoord(at: convert(point, from: nil))
         if let match = triggerMatch(at: coord), match.trigger.clickAction != nil { return nil }
-        return commandBlock(at: coord, snapshot: snapshot)
+        return copyTarget(at: coord, snapshot: snapshot)
     }
+
+    /// A cell can read as both a command block and a coloured run. The block
+    /// wins unless the run takes in every character of it: then the "command"
+    /// is a row of a coloured paragraph that happens to open with `bash`, and
+    /// copying one row of the paragraph would be the wrong half.
+    private func copyTarget(at coord: (col: Int, row: Int),
+                            snapshot: TerminalSnapshot) -> CopyTarget? {
+        let block = commandBlock(at: coord, snapshot: snapshot)
+        guard let run = colorRun(at: coord, snapshot: snapshot) else {
+            return block.map { .block($0) }
+        }
+        guard let block,
+              !ColorRunDetector.run(run, covers: block.firstRow...block.lastRow, in: snapshot)
+        else { return .run(run) }
+        return .block(block)
+    }
+
+    // MARK: command blocks
 
     /// Takes the snapshot rather than fetching one: the frame that marks the
     /// block already has it, and a ⌘-hover asks once per frame.
@@ -720,6 +754,55 @@ final class TerminalView: NSView, CALayerDelegate {
         // Held until the sheet closes; nothing else owns it.
         copySheet = sheet
         sheet.present(in: window)
+    }
+
+    // MARK: coloured runs
+
+    private func colorRun(at coord: (col: Int, row: Int),
+                          snapshot: TerminalSnapshot) -> ColorRun? {
+        ColorRunDetector.run(at: coord,
+                             snapshot: snapshot,
+                             defaultForeground: PackedColor(lastAppliedTheme.foreground))
+    }
+
+    /// Asks before writing, as a command block does, and marks the run in
+    /// the grid behind the sheet for as long as it is up.
+    private func confirmCopy(_ run: ColorRun) {
+        pendingCopyRun = run
+        invalidate()
+        let sheet = RunCopySheet(
+            run: run,
+            theme: lastAppliedTheme,
+            done: { [weak self] in
+                guard let self else { return }
+                self.pendingCopyRun = nil
+                self.invalidate()
+            },
+            copy: { text in
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(text, forType: .string)
+            })
+        // Held until the sheet closes; nothing else owns it.
+        runCopySheet = sheet
+        sheet.present(in: window)
+    }
+
+    /// Marked in the run's own colour, faintly, rather than the selection
+    /// colour command blocks use: a coloured run is by definition a colour
+    /// that stands off the background, whereas a theme's selection colour may
+    /// barely do so — Pencil Light's is #ededed on #f9f9f9, and a tint in it
+    /// over one word went unseen.
+    private func runBands(_ run: ColorRun) -> [HighlightBand] {
+        var tint = run.color.simd
+        tint.w = Self.runTintAlpha
+        return run.segments.map {
+            HighlightBand(col: $0.col,
+                          row: $0.row,
+                          length: $0.length,
+                          color: tint,
+                          style: .background)
+        }
     }
 
     private func triggerMatch(at coord: (col: Int, row: Int)) -> TriggerMatch? {
@@ -1547,6 +1630,9 @@ final class TerminalView: NSView, CALayerDelegate {
         if let extent = pendingCopyExtent {
             bands.append(contentsOf: rowBands(extent, snapshot: snapshot))
         }
+        if let run = pendingCopyRun {
+            bands.append(contentsOf: runBands(run))
+        }
 
         // Trigger highlights only show while ⌘ is held — same affordance
         // iTerm and Terminal.app use for "this is clickable". Drawn first
@@ -1573,8 +1659,16 @@ final class TerminalView: NSView, CALayerDelegate {
             // The command block under the pointer is marked as a region, not
             // as a run of text: what lights up is the extent ⌘-click copies,
             // and a block is an area in a way a link never is.
-            if let block = hoveredCommandBlock(snapshot: snapshot) {
+            switch hoveredCopyTarget(snapshot: snapshot) {
+            case .block(let block):
                 bands.append(contentsOf: rowBands(block.firstRow...block.lastRow, snapshot: snapshot))
+            case .run(let run):
+                // A run is marked cell for cell rather than row for row: it
+                // starts and stops mid-line, and the tint claims no more than
+                // the copy takes.
+                bands.append(contentsOf: runBands(run))
+            case nil:
+                break
             }
 
             // The link under the pointer is marked whatever its trigger's own

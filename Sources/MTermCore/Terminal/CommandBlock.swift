@@ -208,7 +208,13 @@ package enum CommandBlockDetector {
         if let head = tokens.first, head == "sudo" || head == "doas" { tokens.removeFirst() }
         guard let name = tokens.first, !name.isEmpty else { return false }
 
-        let named = isExecutable(name)
+        // A name that resolves proves little when the word after it is
+        // English: `who is this for`, `time to ship`, `find the file` all
+        // open with something on `$PATH`, and an argument is almost never an
+        // article, a pronoun or a preposition. `who am i` is why "am" isn't
+        // in the list.
+        let prose = tokens.count > 1 && Self.functionWords.contains(tokens[1].lowercased())
+        let named = isExecutable(name) && !prose
 
         // A flag, but only near the front. A command reaches its first flag
         // within a word or two — `git log --graph`, `terraform apply
@@ -236,6 +242,14 @@ package enum CommandBlockDetector {
         }
         return named || shell
     }
+
+    /// Words that follow a verb in a sentence and never in a command line.
+    private static let functionWords: Set<String> = [
+        "a", "an", "the", "this", "that", "these", "those",
+        "is", "are", "was", "were", "be", "has", "have", "can", "will", "should",
+        "it", "its", "it's", "you", "your", "we", "our", "they", "their",
+        "to", "of", "for", "and", "or", "but", "with", "as", "if",
+    ]
 
     /// The command without its prompt, or nil when the line doesn't carry one.
     ///
