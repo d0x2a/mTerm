@@ -14,7 +14,9 @@ final class TerminalView: NSView, CALayerDelegate {
 
     /// Readable so the window controller can hand this tab's session to a
     /// `TmuxController` as its command channel.
-    private(set) var session: Session?
+    private(set) var session: Session? {
+        didSet { TabDirectory.shared.setNeedsNotify() }
+    }
     private var displayLink: CADisplayLink?
 
     weak var delegate: TerminalViewDelegate?

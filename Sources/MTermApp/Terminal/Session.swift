@@ -14,7 +14,37 @@ protocol SessionTransport: AnyObject {
     func sessionResize(cols: Int, rows: Int, from session: Session)
 }
 
-final class Session: TmuxCommandSink, TmuxPaneSink {
+/// One thing that happened to a session's grid, as `Session.mirror` reports
+/// it. Between them these are every way the grid changes: anything else a
+/// session does to it arrives as bytes.
+package enum SessionMirrorEvent {
+    /// Bytes the parser has just been fed. Only valid during the call.
+    case output(UnsafeBufferPointer<UInt8>)
+    /// The grid was resized, and reflowed unless it is a tmux pane's.
+    case resize(cols: Int, rows: Int)
+    /// Colours already on the grid were remapped from one theme to the other.
+    case themeChange(from: Theme, to: Theme)
+}
+
+/// A standing `Session.mirror` request. It ends when cancelled or released.
+package final class SessionMirror {
+    fileprivate weak var session: Session?
+    private var cancelled = false
+
+    fileprivate init(session: Session) {
+        self.session = session
+    }
+
+    package func cancel() {
+        guard !cancelled else { return }
+        cancelled = true
+        session?.endMirror(ObjectIdentifier(self))
+    }
+
+    deinit { cancel() }
+}
+
+package final class Session: TmuxCommandSink, TmuxPaneSink {
     /// nil for a tmux-backed session, which has a transport instead.
     private let pty: Pty?
     /// Set for a tmux-backed session. Weak: the controller owns the tabs that
@@ -166,10 +196,13 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
     /// state — which is why the settled grid always matches tmux — but showing
     /// them is what makes a redraw look torn: half a spinner line with the
     /// next line's text already written over the rest of it.
-    func receive(_ bytes: [UInt8]) {
+    package func receive(_ bytes: [UInt8]) {
         queue.async { [weak self] in
             guard let self else { return }
-            bytes.withUnsafeBufferPointer { self.parser.feed(bytes: $0) }
+            bytes.withUnsafeBufferPointer {
+                self.parser.feed(bytes: $0)
+                self.mirrorOutput($0)
+            }
             let now = DispatchTime.now().uptimeNanoseconds
             if now &- self.lastReceivePublish >= Self.publishInterval {
                 self.lastReceivePublish = now
@@ -202,7 +235,7 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
     }
 
     /// Ends a tmux-backed session, the way EOF ends a PTY-backed one.
-    func transportClosed() {
+    package func transportClosed() {
         notifyChildExit()
     }
 
@@ -329,6 +362,7 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
         queue.async { [weak self] in
             guard let self else { return }
             self.state.applyThemeChange(from: old, to: new)
+            self.sendToMirrors(.themeChange(from: old, to: new))
             self.publish()
         }
     }
@@ -342,7 +376,58 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
         }
     }
 
-    func write(_ bytes: [UInt8]) {
+    // MARK: mirroring
+
+    /// Session-queue only.
+    private var mirrors: [ObjectIdentifier: (SessionMirrorEvent) -> Void] = [:]
+
+    /// Follows this session from outside its view — for something that keeps
+    /// its own copy of the grid, which needs the grid as it stands and then
+    /// every change after it, with nothing missed or repeated in between.
+    ///
+    /// `start` runs first, on the session queue, with the grid as of that
+    /// moment: the place to capture it. From then on `event` hears every
+    /// change, in order, on the same queue — bytes as they are parsed, and the
+    /// two changes that don't come as bytes, a resize and a theme remap —
+    /// until the returned mirror is cancelled or released. Both run where
+    /// parsing does, so they have to be quick and must not call back into
+    /// this session synchronously.
+    package func mirror(start: @escaping (TerminalState) -> Void,
+                        event: @escaping (SessionMirrorEvent) -> Void) -> SessionMirror {
+        let mirror = SessionMirror(session: self)
+        let key = ObjectIdentifier(mirror)
+        queue.async { [weak self] in
+            guard let self else { return }
+            start(self.state)
+            self.mirrors[key] = event
+        }
+        return mirror
+    }
+
+    /// Queued behind whatever the mirror might still be in the middle of, so
+    /// it hears nothing after this; the key can only be reused once the
+    /// mirror is gone, by which point this has been queued.
+    fileprivate func endMirror(_ key: ObjectIdentifier) {
+        queue.async { [weak self] in
+            self?.mirrors[key] = nil
+        }
+    }
+
+    /// Session-queue only. Once per read, not per byte, so an empty check is
+    /// all a session nobody mirrors pays.
+    private func mirrorOutput(_ bytes: UnsafeBufferPointer<UInt8>) {
+        guard !mirrors.isEmpty else { return }
+        sendToMirrors(.output(bytes))
+    }
+
+    /// Session-queue only.
+    private func sendToMirrors(_ event: SessionMirrorEvent) {
+        for send in mirrors.values { send(event) }
+    }
+
+    /// Sends keystrokes, or anything else, to whatever is on the other end.
+    /// Main thread: a tmux pane's bytes leave through the window's controller.
+    package func write(_ bytes: [UInt8]) {
         if let pty {
             pty.write(bytes)
         } else {
@@ -351,7 +436,7 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
     }
 
     /// Sends one control-mode command to the tmux running in this tab.
-    func sendTmuxCommand(_ command: String) {
+    package func sendTmuxCommand(_ command: String) {
         guard tmuxClient != nil else { return }
         write(Array((command + "\n").utf8))
     }
@@ -363,6 +448,7 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
         queue.async { [weak self] in
             guard let self else { return }
             self.state.resize(cols: cols, rows: rows)
+            self.sendToMirrors(.resize(cols: cols, rows: rows))
             self.publish()
         }
         if let pty {
@@ -426,6 +512,7 @@ final class Session: TmuxCommandSink, TmuxPaneSink {
                 buf.withUnsafeBufferPointer { ptr in
                     let slice = UnsafeBufferPointer(start: ptr.baseAddress, count: Int(n))
                     parser.feed(bytes: slice)
+                    mirrorOutput(slice)
                 }
                 produced = true
                 // This loop runs until the writer pauses, which under something

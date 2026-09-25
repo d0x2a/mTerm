@@ -2,12 +2,14 @@ import MTermCore
 import AppKit
 import Foundation
 
-final class Tab {
-    let id = UUID()
+package final class Tab {
+    package let id = UUID()
     let terminalView: TerminalView
     /// Display title for the sidebar — typically the cwd's basename, falls
     /// back to the shell's OSC title or "mTerm".
-    var displayTitle: String = "mTerm"
+    package internal(set) var displayTitle: String = "mTerm" {
+        didSet { if displayTitle != oldValue { TabDirectory.shared.setNeedsNotify() } }
+    }
     /// Which profile started this tab, kept so session restore can bring it
     /// back on the same one. nil means the default profile at the time the
     /// tab was made — deliberately not resolved to an id here, so a tab
@@ -23,6 +25,11 @@ final class Tab {
     /// Closing it closes the tmux window; it is not restored across launches,
     /// because the tmux server may be gone and reattaching is the user's call.
     var tmuxWindowID: String?
+
+    /// The tab's session, once it has one. A tab's shell starts the first time
+    /// the tab is shown, so one restored in the background has none until it
+    /// is selected; `TabObserver`s hear when it arrives.
+    package var session: Session? { terminalView.session }
 
     init(initialCwd: String?, profile: Profile? = nil) {
         let v = TerminalView(frame: .zero)

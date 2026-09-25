@@ -25,8 +25,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     /// reference the window would deallocate before NSApp.windows can grab it.
     private let retainedWindow: NSWindow
 
-    private(set) var tabs: [Tab] = []
-    private(set) var activeTabId: UUID?
+    private(set) var tabs: [Tab] = [] {
+        didSet { TabDirectory.shared.setNeedsNotify() }
+    }
+    private(set) var activeTabId: UUID? {
+        didSet { TabDirectory.shared.setNeedsNotify() }
+    }
 
     private let sidebar = SidebarView()
 /// One Metal surface and one Renderer for the whole window; the active
@@ -74,6 +78,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
         // led to surprising behavior when the user double-clicked to zoom.
 
         sidebar.delegate = self
+        TabDirectory.shared.register(self)
 
         let sidebarVC = NSViewController()
         sidebarVC.view = sidebar
@@ -511,6 +516,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate,
     // MARK: NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
+        TabDirectory.shared.unregister(self)
         // Settings isn't a document window — with the last terminal gone there
         // is nothing left for it to configure, and leaving it up keeps the app
         // running: `applicationShouldTerminateAfterLastWindowClosed` only fires
