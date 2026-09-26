@@ -8,7 +8,7 @@ enum SettingsField: Hashable {
     case sidebar
     // Appearance
     case mode, lightTheme, darkTheme, importTheme
-    case fontFamily, fontSize, strokeWeight, lineHeight, blinkCursor
+    case fontFamily, fontSize, strokeWeight, lineHeight, blinkCursor, displaySync
     // Profiles
     case profileList, profileAdd, profileRemove, profileMoveUp, profileMoveDown
     case profileName, profileCommand, profileDirectory, profileChooseDirectory

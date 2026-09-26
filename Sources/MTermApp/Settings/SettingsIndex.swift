@@ -77,6 +77,8 @@ enum SettingsIndex {
               "leading line height density cramped rows"),
         .init(.blinkCursor, .appearance, "Blink cursor",
               "caret flashing pulse"),
+        .init(.displaySync, .appearance, "Sync frames to the display",
+              "vsync latency lag tearing refresh input responsive fast rendering"),
 
         // Profiles
         .init(.profileList, .profiles, "Profiles",

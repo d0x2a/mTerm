@@ -99,6 +99,20 @@ struct AppearancePane: View {
                                       onActivate: { store.settings.blinkCursor.toggle() })
             }
 
+            Section("Rendering") {
+                Toggle("Sync frames to the display", isOn: $store.settings.displaySync)
+                    .focusableControl(.displaySync, focus: $focus,
+                                      onActivate: { store.settings.displaySync.toggle() })
+                Text("On, a frame waits for the display's next refresh, the way every "
+                     + "macOS app draws. Off, it goes to the compositor as soon as it is "
+                     + "drawn: a few milliseconds less between a keystroke and its echo, "
+                     + "at the risk of a torn frame under heavy output. Some external "
+                     + "displays (DisplayLink adapters) don't cope with unsynchronized "
+                     + "frames; leave this on for those.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Preview") {
                 ThemePreview(theme: store.current,
                              fontFamily: store.settings.fontFamily,

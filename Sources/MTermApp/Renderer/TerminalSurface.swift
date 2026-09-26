@@ -37,6 +37,9 @@ final class TerminalSurface: NSView {
     private var appliedFontSize = ThemeStore.shared.settings.fontSize
     private var appliedStrokeWeight = ThemeStore.shared.settings.strokeWeight
     private var appliedLineHeight = ThemeStore.shared.settings.lineHeight
+    /// Whether presents wait for the display's refresh, as last applied to the
+    /// layer. See `AppSettings.displaySync`.
+    private var appliedDisplaySync = ThemeStore.shared.settings.displaySync
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -62,19 +65,22 @@ final class TerminalSurface: NSView {
         layer.allowsNextDrawableTimeout = false
         layer.needsDisplayOnBoundsChange = true
         layer.isOpaque = true            // we render fully-opaque frames
-        // Present drawables inside the current CA transaction so a frame is
-        // never shown at a size that disagrees with the layer's geometry —
-        // this is what keeps live resize (window + sidebar divider) smooth.
-        layer.presentsWithTransaction = true
+        // `presentsWithTransaction` is decided per frame by Renderer.render:
+        // on for the frame presented in the same layout pass as a resize, so
+        // it can never be shown at a size that disagrees with the layer's
+        // geometry — which is what keeps live resize (window + sidebar
+        // divider) smooth — and off for every other frame, where riding the
+        // transaction only added a wait for the GPU to the keystroke path.
+        layer.displaySyncEnabled = appliedDisplaySync
         // maximumDrawableCount stays at its default of 3. Dropping it to 2
         // looks free — we present at most one frame per tick, so the third is
-        // never in flight — but presentsWithTransaction makes the present
-        // synchronous on the main thread, and nextDrawable is the first call
-        // in it. At two, that call waits on the compositor to release the one
-        // on screen: 1.3-2.7ms average and 14ms worst case against 0.02ms at
-        // three, which cost ~10fps of throughput and the same stall on
-        // keystroke echo. It saved nothing either way — Core Animation keeps
-        // three surfaces resident regardless.
+        // never in flight — but a transactional present is synchronous on the
+        // main thread, and nextDrawable is the first call in it. At two, that
+        // call waited on the compositor to release the one on screen: 1.3-2.7ms
+        // average and 14ms worst case against 0.02ms at three, which cost
+        // ~10fps of throughput and the same stall on keystroke echo (measured
+        // when every present was transactional). It saved nothing either way —
+        // Core Animation keeps three surfaces resident regardless.
         return layer
     }
 
@@ -148,6 +154,15 @@ final class TerminalSurface: NSView {
         guard let metalLayer, let device = metalLayer.device else { return false }
         renderer = makeRenderer(device: device, layer: metalLayer)
         return true
+    }
+
+    /// Applies a change to the display-sync setting. It takes effect on the
+    /// next present; nothing needs rebuilding.
+    func reconcileDisplaySyncIfChanged() {
+        let wanted = ThemeStore.shared.settings.displaySync
+        guard wanted != appliedDisplaySync else { return }
+        appliedDisplaySync = wanted
+        metalLayer?.displaySyncEnabled = wanted
     }
 
     private func updateDrawableSize() {

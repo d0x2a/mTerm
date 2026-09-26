@@ -41,6 +41,16 @@ package struct AppSettings: Codable, Equatable {
     /// and Alacritty ship, and a cursor that pulses twice a second is the one
     /// thing on an idle screen that keeps redrawing.
     package var blinkCursor: Bool = false
+    /// Wait for the display's refresh before showing a frame. On, a frame goes
+    /// up on the next vertical refresh, as every macOS app's does. Off, the
+    /// drawable is handed to the compositor the moment the GPU finishes it.
+    /// Measured at 120 Hz, that brought the drawable's `presentedTime` from
+    /// 23 ms after the keystroke to 17 ms — a lower bound, since in this mode
+    /// the timestamp is no longer tied to a refresh — at the risk of a torn
+    /// frame under heavy output. Ghostty ships the same switch (`window-vsync`)
+    /// and warns that unsynchronized presents misbehave on DisplayLink
+    /// adapters on macOS 14.4 and later, so this stays on by default.
+    package var displaySync: Bool = true
     package var warnOnCloseWithRunningProcess: Bool = true
 
     /// Confirm ⇧⌘K before it runs. Clear Screen is the one command that
@@ -81,7 +91,8 @@ package struct AppSettings: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case appearanceMode, lightThemeId, darkThemeId, fontFamily, fontSize,
-             strokeWeight, lineHeight, blinkCursor, warnOnCloseWithRunningProcess,
+             strokeWeight, lineHeight, blinkCursor, displaySync,
+             warnOnCloseWithRunningProcess,
              confirmClearScreen,
              notificationsEnabled, notifyOnBell, notifyOnlyWhenUnfocused,
              scrollbackLines, shellIntegrationEnabled, defaultProfileId
@@ -99,6 +110,7 @@ package struct AppSettings: Codable, Equatable {
         try c.encode(strokeWeight, forKey: .strokeWeight)
         try c.encode(lineHeight, forKey: .lineHeight)
         try c.encode(blinkCursor, forKey: .blinkCursor)
+        try c.encode(displaySync, forKey: .displaySync)
         try c.encode(warnOnCloseWithRunningProcess, forKey: .warnOnCloseWithRunningProcess)
         try c.encode(confirmClearScreen, forKey: .confirmClearScreen)
         try c.encode(notificationsEnabled, forKey: .notificationsEnabled)
@@ -134,6 +146,7 @@ package struct AppSettings: Codable, Equatable {
         // Absent from settings files written before this existed, which take
         // the new default and stop blinking.
         self.blinkCursor = try c.decodeIfPresent(Bool.self, forKey: .blinkCursor) ?? false
+        self.displaySync = try c.decodeIfPresent(Bool.self, forKey: .displaySync) ?? true
         self.warnOnCloseWithRunningProcess =
             try c.decodeIfPresent(Bool.self, forKey: .warnOnCloseWithRunningProcess) ?? true
         // Absent from settings files written before this existed, which take

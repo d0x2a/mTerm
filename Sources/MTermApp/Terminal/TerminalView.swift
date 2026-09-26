@@ -275,10 +275,11 @@ final class TerminalView: NSView, CALayerDelegate {
         // The surface sized its drawable in its own setFrameSize, which AppKit
         // runs before laying us out, so the grid below reads the new size.
         resizeSessionIfNeeded()
-        // Present immediately at the new size. With `presentsWithTransaction`
-        // the present lands in the same CA transaction as the layout change,
-        // so the divider/window drag stays smooth instead of stretching the
-        // previous frame until the next display-link tick.
+        // Present immediately at the new size, and transactionally, so the
+        // present lands in the same CA transaction as the layout change and
+        // the divider/window drag stays smooth instead of stretching the
+        // previous frame until the next display-link tick. Every other frame
+        // presents asynchronously; see Renderer.render.
         //
         // Through the synchronized-update gate, though, like the other two
         // present paths. A drag lands in the middle of a full-screen app's
@@ -289,11 +290,11 @@ final class TerminalView: NSView, CALayerDelegate {
         // tick, the moment the update closes.
         needsFrame = true
         guard let frame = session?.publishedFrame(scrollOffset: scrollOffset) else {
-            renderFrame()
+            renderFrame(transactional: true)
             return
         }
         if frame.synchronizedUpdateActive { return }
-        renderFrame(using: frame.snapshot)
+        renderFrame(using: frame.snapshot, transactional: true)
     }
 
     // MARK: input
@@ -963,31 +964,20 @@ final class TerminalView: NSView, CALayerDelegate {
     /// Rate-limited to one present per refresh period — under a firehose the
     /// display can't show more than that anyway, and the tick picks up whatever
     /// is still pending.
+    ///
+    /// Presented at once, with no settling delay. This used to wait 3 ms so
+    /// that codex's bare erase-screen — flushed outside its synchronized
+    /// update, with the bracketed repaint a moment behind — would be folded
+    /// into that repaint instead of going up as a blank frame. The erase now
+    /// arms a hold of its own (`TerminalState.holdForRepaintAfterErase`),
+    /// which the gate below honours, so the wait no longer bought anything.
+    /// It cost every echo about 4 ms (3 asked for, plus the timer's leeway),
+    /// enough to push half of them a whole frame later: 26.0 ms from keyDown
+    /// to the drawable's `presentedTime` with the wait, 23.4 ms without, at
+    /// 120 Hz.
     private func sessionDidOutput() {
         needsFrame = true
         guard CACurrentMediaTime() - lastPresentTime >= frameInterval else { return }
-        // Let the burst settle before presenting. A chunk is as likely to be
-        // the first piece of a redraw as the whole of it, and one shape is
-        // common enough to matter: codex flushes a bare erase-screen — outside
-        // its synchronized update, on purpose — and follows it a moment later
-        // with the sync-bracketed repaint. Presenting the erase the instant it
-        // landed showed a blank screen for a frame on every resize. Waiting a
-        // few milliseconds folds the two together, and by then the bracket is
-        // open and the gate below holds. A keystroke echo pays those few
-        // milliseconds; under a firehose the tick presents every frame anyway.
-        pendingOutputPresent?.cancel()
-        let present = DispatchWorkItem { [weak self] in self?.presentSettledOutput() }
-        pendingOutputPresent = present
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.outputSettleInterval,
-                                      execute: present)
-    }
-
-    private var pendingOutputPresent: DispatchWorkItem?
-    private static let outputSettleInterval: TimeInterval = 0.003
-
-    private func presentSettledOutput() {
-        pendingOutputPresent = nil
-        guard needsFrame else { return }
         // Honour the synchronized-update gate here too: "output" is just as
         // likely to be the first half of a frame the child hasn't finished
         // drawing, and presenting it regardless is what made a TUI's composer
@@ -1519,6 +1509,7 @@ final class TerminalView: NSView, CALayerDelegate {
         reportFocusIfChanged()
         reconcileThemeIfChanged()
         reconcileFontIfChanged()
+        surface?.reconcileDisplaySyncIfChanged()
         reconcileTriggersIfChanged()
         // Idle ticks used to rebuild and present the whole grid 120 times a
         // second whether or not a pixel had changed. The blink phase is part of
@@ -1558,7 +1549,13 @@ final class TerminalView: NSView, CALayerDelegate {
     /// link each tick, but also invoked synchronously from `setFrameSize` so a
     /// resize presents a correctly-sized frame in the same layout pass instead
     /// of letting Core Animation stretch the stale drawable until the next tick.
-    private func renderFrame(using prefetched: TerminalSnapshot? = nil) {
+    ///
+    /// `transactional` asks for the present to ride the current Core Animation
+    /// transaction, which is what the resize frame needs. It is also forced for
+    /// the length of a live window resize, where every frame is a resize frame
+    /// in spirit and latency is nobody's concern.
+    private func renderFrame(using prefetched: TerminalSnapshot? = nil,
+                             transactional: Bool = false) {
         guard let metalLayer = surface?.metalLayer, let renderer else { return }
         let snapshot = prefetched
             ?? session?.snapshot(scrollOffset: scrollOffset)
@@ -1618,7 +1615,8 @@ final class TerminalView: NSView, CALayerDelegate {
                         highlights: composedHighlights(snapshot: snapshot),
                         focused: focused,
                         cursorOn: cursorBlinkOn(),
-                        theme: lastAppliedTheme)
+                        theme: lastAppliedTheme,
+                        transactional: transactional || inLiveResize)
     }
 
     private func composedHighlights(snapshot: TerminalSnapshot) -> [HighlightBand] {

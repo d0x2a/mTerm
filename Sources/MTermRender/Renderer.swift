@@ -458,13 +458,30 @@ package final class Renderer {
     /// shared by every tab in a window, and a profile may pin a palette of its
     /// own, so the palette has to arrive with the frame rather than be read
     /// from `ThemeStore` here.
+    ///
+    /// `transactional` presents the frame inside the current Core Animation
+    /// transaction, which is what a frame drawn in the same layout pass as a
+    /// geometry change needs: committed together, the new size and the new
+    /// pixels reach the screen in one step, where an asynchronous present
+    /// would let Core Animation stretch the previous frame to the new bounds
+    /// for a tick. Everything else presents asynchronously. The transactional
+    /// path blocks the main thread until the GPU has scheduled the frame
+    /// (~0.35 ms measured) and is bound to the commit at the end of the run
+    /// loop pass; the asynchronous one hands the drawable on as soon as the
+    /// GPU is done with it.
     package func render(to layer: CAMetalLayer,
                 snapshot: TerminalSnapshot,
                 selection: Selection?,
                 highlights: [HighlightBand],
                 focused: Bool,
                 cursorOn: Bool,
-                theme: Theme) {
+                theme: Theme,
+                transactional: Bool = false) {
+        // Set before the drawable is taken — the mode belongs to the layer,
+        // not the drawable — and only written when it changes.
+        if layer.presentsWithTransaction != transactional {
+            layer.presentsWithTransaction = transactional
+        }
         guard let drawable = layer.nextDrawable() else { return }
         let drawableSize = layer.drawableSize
 
@@ -529,13 +546,20 @@ package final class Renderer {
         }
 
         enc.endEncoding()
-        // The layer uses `presentsWithTransaction`, so the present must be
-        // committed by us inside the current CA transaction rather than handed
-        // to Core Animation asynchronously: schedule the work, wait for it, then
-        // present in-line. This keeps frames in lockstep with layer geometry
-        // during live resize.
-        cb.commit()
-        cb.waitUntilScheduled()
-        drawable.present()
+        if transactional {
+            // With `presentsWithTransaction` the present has to be issued by
+            // us inside the current CA transaction rather than handed to Core
+            // Animation asynchronously: schedule the work, wait for it, then
+            // present in-line. This keeps the frame in lockstep with the layer
+            // geometry it was drawn for.
+            cb.commit()
+            cb.waitUntilScheduled()
+            drawable.present()
+        } else {
+            // Presented once the command buffer is scheduled, from Metal's
+            // own thread; nothing here waits on the GPU.
+            cb.present(drawable)
+            cb.commit()
+        }
     }
 }
