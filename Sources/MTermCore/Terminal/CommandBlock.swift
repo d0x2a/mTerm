@@ -176,6 +176,11 @@ package enum CommandBlockDetector {
                 joined += "\n" + texts[i]
                 heredoc = heredocDelimiter(texts[i])
             }
+            // A heredoc still open at the end of the run has taken in every
+            // line after it, and is cut off besides: by the edge of the
+            // screen, or by a TUI shortening what it shows. Copied, it would
+            // leave a shell waiting on stdin.
+            if heredoc != nil { return nil }
             if (start...i).contains(index) { return start...i }
             i += 1
         }
@@ -224,11 +229,14 @@ package enum CommandBlockDetector {
         let flag = tokens.prefix(Self.flagLookahead).contains {
             $0.range(of: #"^-{1,2}[A-Za-z]"#, options: .regularExpression) != nil
         }
+        // A bar with a count after it is a diffstat, not a pipe:
+        // `RootView.swift |   3 +-`, `AppIcon.png | Bin 812 -> 640 bytes`.
+        let pipe = line.range(of: #" \| (?! *(?:\d|Bin ))"#, options: .regularExpression) != nil
         // `continues` rather than `hasSuffix`: these lines come off the grid
         // with the row's trailing padding still on them, so a command ending
         // in a backslash does not end in one as a string.
         let shell = flag
-            || line.contains(" | ")
+            || pipe
             || continues(line)
             || heredocDelimiter(line) != nil
 
@@ -300,22 +308,35 @@ package enum CommandBlockDetector {
 
     /// The line that opened the heredoc `index` sits inside, if it sits in one.
     ///
-    /// Looks back past blank lines, which a body is allowed to contain, and
-    /// stops if it finds the terminator first — that heredoc closed before the
-    /// pointer and has nothing to do with it.
+    /// Looks back past blank lines, which a body is allowed to contain, for
+    /// the nearest opener, then needs its terminator at or below the pointer.
+    /// One above it closed that heredoc before the pointer. None at all means
+    /// there is no telling a body from what follows an opener that was never
+    /// finished on screen — Claude Code cuts the command it shows short, so
+    /// a heredoc it ran arrives as `<<'EOF'`, a line of body and `…)`, and
+    /// everything after it would otherwise read as body.
     package static func heredocOpener(enclosing index: Int, in lines: [LogicalLine]) -> Int? {
         var scanned = 0
         var j = index - 1
         while j >= 0, scanned < maxRows {
             if let delimiter = heredocDelimiter(lines[j].text) {
-                let terminated = ((j + 1)..<index).contains {
-                    lines[$0].text.trimmingCharacters(in: .whitespaces) == delimiter
-                }
-                return terminated ? nil : j
+                guard let end = terminator(of: delimiter, openedAt: j, in: lines) else { return nil }
+                return index <= end ? j : nil
             }
-            // A terminator above us closes whatever came before it.
             j -= 1
             scanned += 1
+        }
+        return nil
+    }
+
+    /// The line that closes the heredoc opened at `opener`, if one does
+    /// within `maxRows` of it.
+    private static func terminator(of delimiter: String, openedAt opener: Int,
+                                   in lines: [LogicalLine]) -> Int? {
+        var k = opener + 1
+        while k < lines.count, lines[k].lastRow - lines[opener].firstRow < maxRows {
+            if lines[k].text.trimmingCharacters(in: .whitespaces) == delimiter { return k }
+            k += 1
         }
         return nil
     }

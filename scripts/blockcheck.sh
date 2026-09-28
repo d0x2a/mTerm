@@ -121,3 +121,18 @@ n "at ssh. The bang is how Claude Code showed the command it ran; pasted into"
 n "an interactive shell it would be history expansion instead. The line it"
 n "printed below stays out."
 echo
+b "11. A HEREDOC CUT SHORT — nothing below it joins in"
+echo
+echo "● Bash(cat > /tmp/msg.txt <<'EOF'"
+echo "      Replace the rising line with first…)"
+echo "  ⎿  Error: Exit code 128"
+echo
+echo "● Retrying with an array."
+echo
+echo "      ios/Ahead/App/RootView.swift                       |   3 +-"
+echo "     … +14 lines (ctrl+o to expand)"
+echo
+n "this is how Claude Code shows a heredoc it ran: cut short, the terminator"
+n "never on screen. ⌘-hover any of it: nothing tints. There is no copying a"
+n "heredoc without its end, and a diffstat's bar is not a pipe."
+echo

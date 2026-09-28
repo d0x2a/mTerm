@@ -1322,6 +1322,41 @@ do {
     check("and that output line is not a target of its own",
           hereBlock(8) == nil)
 
+    // Claude Code shows the command it ran cut short, so a heredoc it wrote
+    // arrives with no terminator on screen. This is a real screen: holding ⌘
+    // anywhere below the opener marked everything from it to the status
+    // line as one command.
+    let (cut, feedCut) = buffer(cols: 120, rows: 22)
+    feedCut("● Bash(cat > /private/tmp/claude-501/scratchpad/icon-msg.txt <<'EOF'\r\n")
+    feedCut("      Replace the rising line with first…)\r\n")
+    feedCut("  ⎿  Error: Exit code 128\r\n")
+    feedCut("     fatal: pathspec 'ios/Ahead/App/RootView.swift' did not match any files\r\n")
+    feedCut("\r\n")
+    feedCut("● zsh doesn't split $FILES into words, so the add failed. Retrying with an array.\r\n")
+    feedCut("\r\n")
+    feedCut("● Bash(files=(ios/Ahead/App/RootView.swift ios/Ahead/Core/Components/Chrome.swift…)\r\n")
+    feedCut("  ⎿  32614e3 Replace the rising line with first light\r\n")
+    feedCut("\r\n")
+    feedCut("      ios/Ahead/App/RootView.swift                       |   3 +-\r\n")
+    feedCut("      ios/Ahead/Resources/AppIcon.png                    | Bin 81243 -> 64012 bytes\r\n")
+    feedCut("     … +14 lines (ctrl+o to expand)\r\n")
+    feedCut("  ⎿  Allowed by auto mode classifier\r\n")
+    feedCut("\r\n")
+    feedCut("● I committed the new icon to main as 32614e3 and pushed it to origin.\r\n")
+    let cutSnap = cut.snapshot()
+    let git: (String) -> Bool = { $0 == "cat" || $0 == "git" }
+    let cutBlocks = (0..<16).compactMap {
+        CommandBlockDetector.block(containingRow: $0, snapshot: cutSnap, isExecutable: git)
+    }
+    check("a heredoc with no terminator on screen is not a target",
+          cutBlocks.isEmpty,
+          cutBlocks.map { "\($0.firstRow)-\($0.lastRow)" }.joined(separator: " "))
+    check("a diffstat's bar is not a pipe",
+          !CommandBlockDetector.looksLikeCommand(
+            "ios/Ahead/App/RootView.swift                       |   3 +-", isExecutable: git)
+            && !CommandBlockDetector.looksLikeCommand(
+            "AppIcon.png | Bin 81243 -> 64012 bytes", isExecutable: git))
+
     // A TUI that runs commands for you echoes them behind a marker. Claude
     // Code's bash mode uses `!`, and `!` pasted into an interactive shell is
     // history expansion rather than the command that was on screen.
