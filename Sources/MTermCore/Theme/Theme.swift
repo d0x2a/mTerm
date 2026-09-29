@@ -48,6 +48,23 @@ package struct Theme: Identifiable, Equatable {
     package let selection: SIMD4<Float>
     package let ansi: [SIMD4<Float>]    // 16 entries: 0-7 normal, 8-15 bright
 
+    /// The memberwise initializer, spelled out only to be `package` rather
+    /// than internal: a theme can arrive from outside this module as its
+    /// colours — a second head's copy of the one a mirrored session is drawn
+    /// in, which may be an import that exists only on the first.
+    package init(id: String, name: String, appearance: ThemeAppearance,
+                 background: SIMD4<Float>, foreground: SIMD4<Float>,
+                 cursor: SIMD4<Float>, selection: SIMD4<Float>, ansi: [SIMD4<Float>]) {
+        self.id = id
+        self.name = name
+        self.appearance = appearance
+        self.background = background
+        self.foreground = foreground
+        self.cursor = cursor
+        self.selection = selection
+        self.ansi = ansi
+    }
+
     /// Colour the link under the pointer takes — both its text and the
     /// underline beneath it, so the two read as one object. Taken from the
     /// palette so it tracks the theme: measured across the bundled
