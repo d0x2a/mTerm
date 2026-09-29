@@ -615,6 +615,30 @@ do {
                                                   style: .background, enabled: false)])
     check("a disabled rule is never compiled", off.evaluate(snapshot: snap).isEmpty)
 
+    // A path that ends a sentence. Claude Code prints inline code in its
+    // accent colour and the full stop after it plain; the colour is no help
+    // to the rule, which reads text alone.
+    func paths(_ line: String) -> [String] {
+        let (s, f) = buffer(cols: 60, rows: 2)
+        f(line)
+        return builtinsOnly.evaluate(snapshot: s.snapshot())
+            .filter { $0.trigger.id == Trigger.pathID }
+            .map(\.text)
+    }
+    let ends: [(String, String, [String])] = [
+        ("a path that ends a sentence leaves the full stop",
+         "see \u{1b}[38;2;177;185;249mscripts/statecheck.sh\u{1b}[39m.", ["scripts/statecheck.sh"]),
+        ("and an ellipsis", "then a/b/c...", ["a/b/c"]),
+        ("a line number keeps its digits", "in Sources/Foo.swift:393.", ["Sources/Foo.swift:393"]),
+        ("`../..` keeps its dots", "cd ../..", ["../.."]),
+        ("and so does `~/.`", "ls ~/.", ["~/."]),
+        ("a dot inside a name is still part of it", "open ~/.config/mterm.json now", ["~/.config/mterm.json"]),
+    ]
+    for (name, line, want) in ends {
+        let got = paths(line)
+        check(name, got == want, "got \(got)")
+    }
+
     let broken = TriggerEvaluator(triggers: [Trigger(name: "Bad", pattern: "[unclosed",
                                                      color: SIMD4(1, 1, 1, 1))]
                                   + Trigger.builtins)

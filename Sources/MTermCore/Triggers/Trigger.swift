@@ -126,11 +126,18 @@ extension Trigger {
     /// trailing `:line[:col]` is part of the match so compiler and grep output
     /// links cleanly instead of stopping at the colon.
     ///
+    /// A match backtracks off a trailing `.`, so a path that ends a sentence
+    /// leaves the full stop behind: `.` is legal in a name, and taking it along
+    /// made `see scripts/build.sh.` a path that doesn't exist, and the on-disk
+    /// check then dropped the link whole. Claude Code ends sentences on inline
+    /// code all the time. A last segment of dots alone is kept — `../..` is a
+    /// path.
+    ///
     /// This pattern is deliberately loose — `and/or` matches it. What keeps
     /// it quiet is that TerminalView drops every path match that doesn't
     /// exist on disk before anything is drawn or clicked.
     package static let pathPattern =
-        #"(?<![\w@:/~.-])(?:(?:~|\.{1,2})?/(?:\#(seg)/)*\#(seg)/?|\#(head)(?:/\#(seg))+/?|\#(head)/)(?::\d+(?::\d+)?)?"#
+        #"(?<![\w@:/~.-])(?:(?:~|\.{1,2})?/(?:\#(seg)/)*\#(seg)/?|\#(head)(?:/\#(seg))+/?|\#(head)/)(?::\d+(?::\d+)?)?(?:(?<!\.)|(?<=/\.{1,2}))"#
 
     /// Stands in for a real trigger on an OSC 8 hyperlink, which no pattern
     /// produced. Having one lets an explicit link reuse the whole path the

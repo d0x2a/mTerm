@@ -47,7 +47,10 @@ echo "   ~/Library"
 echo "   $rel_dir"
 echo "   ./$rel_file"
 echo "   ./$rel_file:42:10"
+echo "   it ends a sentence: ./$rel_file."
+echo "   ../.."
 n "the :42:10 is part of the link; ⌘-click still reveals the file"
+n "the full stop is not part of the link; the dots of ../.. are"
 n "a bare \"$rel_file\" with no slash is NOT a link, by design — otherwise"
 n "every word in ls output that happened to name a file would be one"
 echo
@@ -87,8 +90,11 @@ echo
 b "9. COLOURED OUTPUT — hovering replaces the text colour"
 printf '   \033[32mM  Sources/MTermRender/Renderer.swift\033[0m\n'
 printf '   \033[31merror:\033[0m see \033[36mhttps://example.com/docs\033[0m for details\n'
+printf '   the notes are in \033[38;2;177;185;249m./%s\033[39m.\n' "$rel_file"
 n "hovering one of these swaps its green/cyan for the accent, and it comes"
 n "back on the way out. Only the hovered link, never the rest of the line."
+n "The last is Claude Code's inline code ending a sentence: ⌘-click reveals"
+n "the file rather than offering to copy the coloured run."
 echo
 b "10. SELECTION still works"
 echo "   drag across https://example.com/select-me without holding ⌘"
