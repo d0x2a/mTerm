@@ -54,6 +54,11 @@ final class Pty {
             "TERM_PROGRAM=mTerm",
             "TERM_PROGRAM_VERSION=" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
                                        as? String ?? "dev"),
+            // mTerm handles OSC 8, but nothing can ask a terminal that: tools
+            // guess from TERM_PROGRAM against lists mTerm isn't on. Claude
+            // Code and anything using the `supports-hyperlinks` package take
+            // this instead, and without it print a link as "label (url)".
+            "FORCE_HYPERLINK=1",
         ]
         if ProcessInfo.processInfo.environment["LANG"] == nil {
             env.append("LANG=en_US.UTF-8")
