@@ -1476,13 +1476,57 @@ do {
           run(ls, 3, 0)?.text == "CMTermBridge", run(ls, 3, 0)?.text ?? "nil")
     check("and that space is not a target", run(ls, 12, 0) == nil)
 
-    // The rule Claude Code draws across the window is full width, so it
-    // passes the fit test; it must not fuse with the grey line under it.
+    // A full-width rule passes the fit test; it must not fuse with a line in
+    // its colour under it.
     let (rule, feedRule) = buffer(cols: 20, rows: 3)
-    let grey = "\u{1b}[38;2;153;153;153m"
-    feedRule("\(grey)\(String(repeating: "─", count: 20))\(plain)\r\n\(grey)⎿ Allowed\(plain)\r\n")
+    feedRule("\(accent)\(String(repeating: "─", count: 20))\(plain)\r\n\(perWord("Allowed by rule"))\r\n")
     check("a rule is not a target", run(rule.snapshot(), 5, 0) == nil)
-    check("nor fused with the line under it", run(rule.snapshot(), 3, 1)?.text == "⎿ Allowed")
+    check("nor fused with the line under it", run(rule.snapshot(), 3, 1)?.text == "Allowed by rule")
+
+    // Claude Code's footer, byte for byte from a capture, plus the artifact
+    // pill in both its states: a dim name, and all in the accent after the
+    // artifact failed to open. None of it is text to copy.
+    for theme in [Theme.mTermDark, Theme.mTermLight, Theme.pencilLight] {
+        let (footer, feedFooter) = buffer(cols: 80, rows: 4, theme: theme)
+        let grey = "\u{1b}[38;2;102;102;102m", amber = "\u{1b}[38;2;150;108;30m"
+        let claude = "\u{1b}[38;2;215;119;87m"
+        feedFooter("\u{1b}[3G\(amber)⏵⏵\u{1b}[6Gauto\u{1b}[11Gmode\u{1b}[16Gon")
+        feedFooter("\(grey) (shift+tab\u{1b}[30Gto\u{1b}[33Gcycle)\(plain)\r\n")
+        feedFooter("  \(claude)⧉\(plain) \u{1b}[2mlink-check\u{1b}[22m\r\n")
+        feedFooter("  \(claude)⧉ link-check\(plain)\r\n")
+        feedFooter("\(grey)Claude Code v2.1.285\(plain)\r\n")
+        let fs = footer.snapshot()
+        let tfg = PackedColor(theme.foreground)
+        func frun(_ col: Int, _ row: Int) -> ColorRun? {
+            ColorRunDetector.run(at: (col, row), snapshot: fs, defaultForeground: tfg)
+        }
+        let name = theme.name
+        check("\(name): the grey \"(shift+tab to cycle)\" is not a target", frun(24, 0) == nil,
+              frun(24, 0)?.text ?? "")
+        check("\(name): nor the mode line with its icon", frun(7, 0) == nil, frun(7, 0)?.text ?? "")
+        check("\(name): nor the artifact pill", frun(2, 1) == nil && frun(5, 1) == nil)
+        check("\(name): nor the pill in the accent", frun(6, 2) == nil, frun(6, 2)?.text ?? "")
+        check("\(name): nor the grey version line", frun(3, 3) == nil)
+    }
+
+    // Grey only reads as turned down when it is quieter than body text.
+    let (loud, feedLoud) = buffer(cols: 40, rows: 2, theme: .mTermDark)
+    feedLoud("see \u{1b}[38;2;255;255;255mIMPORTANT\(plain) and \u{1b}[38;2;102;102;102mhint\(plain)\r\n")
+    let lfg = PackedColor(Theme.mTermDark.foreground)
+    check("white on a dark theme is emphasis, and a run",
+          ColorRunDetector.run(at: (6, 0), snapshot: loud.snapshot(), defaultForeground: lfg)?.text == "IMPORTANT")
+    check("grey on it is not",
+          ColorRunDetector.run(at: (19, 0), snapshot: loud.snapshot(), defaultForeground: lfg) == nil)
+
+    // An icon is a non-ASCII symbol; inline code opening with ASCII
+    // punctuation is still code.
+    let (code, feedCode) = buffer(cols: 40, rows: 4)
+    feedCode("a \(accent)<div>\(plain) b\r\n")
+    feedCode("a \(accent)~/src\(plain) b\r\n")
+    feedCode("a \(accent)→ next\(plain) b\r\n")
+    check("inline code opening with < is a run", run(code.snapshot(), 3, 0)?.text == "<div>")
+    check("inline code opening with ~ is a run", run(code.snapshot(), 3, 1)?.text == "~/src")
+    check("a run opening with an arrow is a label", run(code.snapshot(), 5, 2) == nil)
 
     // A row of a coloured paragraph can open with a command's name. The
     // paragraph wins when it covers the block; a command coloured token by

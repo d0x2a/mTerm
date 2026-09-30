@@ -58,6 +58,15 @@ package struct ColorRun: Equatable {
 /// this one ended — which is why the program broke the line there. The fit
 /// test is what keeps `ls -1` from fusing a column of blue directory names
 /// into one: short lines that stop far from the edge weren't wrapped.
+///
+/// Not every colour sets text apart. Claude Code puts its own chrome in colour
+/// too — the version, hints like "(shift+tab to cycle)", the mode line, the
+/// artifact pill under the prompt — and none of it is text anyone copies.
+/// Two things give chrome away: a grey quieter than body text, which is how a
+/// TUI turns something down rather than up, and an icon heading the run,
+/// which makes it a label or a button. The artifact pill is the case that
+/// matters: it reads as a link, but its bytes carry no address, so the most
+/// ⌘-click can do there is nothing.
 package enum ColorRunDetector {
     /// How far short of the right edge a program's own wrap column may sit.
     /// A TUI wraps inside its own margins, not at the terminal's width.
@@ -67,8 +76,14 @@ package enum ColorRunDetector {
     /// passage someone set apart, and marking it would light up the window.
     package static let maxRows = 40
 
+    /// How far from grey a colour may sit and still read as grey, as the
+    /// spread between its strongest and weakest channel. Loose enough to take
+    /// Solarized's blue-tinged base01, which is what that theme dims with.
+    package static let greyChroma: Float = 0.125
+
     /// The run under `coord`, or nil when the cell there is in the default
-    /// foreground, or is padding beside a run rather than part of it.
+    /// foreground, is padding beside a run rather than part of it, or is
+    /// chrome rather than text (see the type's notes).
     package static func run(at coord: (col: Int, row: Int),
                             snapshot: TerminalSnapshot,
                             defaultForeground: PackedColor) -> ColorRun? {
@@ -82,7 +97,8 @@ package enum ColorRunDetector {
         var hit = grid.lead(coord.row, coord.col)
         if let left = grid.bridgedGap(at: hit, row: coord.row) { hit = left }
         let key = grid.key(coord.row, hit)
-        guard key.fg != defaultForeground else { return nil }
+        guard key.fg != defaultForeground,
+              !isMuted(key, defaultForeground: defaultForeground) else { return nil }
 
         guard let first = grid.segment(through: hit, row: coord.row, key: key),
               first.lo <= coord.col, coord.col <= first.hi,
@@ -128,6 +144,7 @@ package enum ColorRunDetector {
             }
             text.append(grid.text(span))
         }
+        guard !opensWithIcon(text) else { return nil }
 
         return ColorRun(segments: spans.map { .init(row: $0.row, col: $0.lo, length: $0.hi - $0.lo + 1) },
                         text: text,
@@ -153,6 +170,57 @@ package enum ColorRunDetector {
                 $0.row == row && $0.col <= start && $0.col + $0.length - 1 >= end
             }
         }
+    }
+
+    // MARK: - chrome
+
+    /// A grey that stands off its background less than body text does. That
+    /// is a TUI turning text down — Claude Code sets its hints, version, model
+    /// line and notes in #666666 — which is the opposite of setting it apart.
+    /// Hue has to count for more than contrast: Claude Code's inline-code blue
+    /// stands off a dark background less than body text does too, and it is
+    /// the main thing a run is for. A grey louder than body text, like white
+    /// on a dark theme's off-white, is emphasis and stays a run.
+    private static func isMuted(_ key: Key, defaultForeground: PackedColor) -> Bool {
+        let c = key.fg.simd
+        let spread = max(c.x, c.y, c.z) - min(c.x, c.y, c.z)
+        guard spread <= greyChroma else { return false }
+        return contrast(key.fg, key.bg) < contrast(defaultForeground, key.bg)
+    }
+
+    /// WCAG contrast ratio, 1 through 21.
+    private static func contrast(_ a: PackedColor, _ b: PackedColor) -> Float {
+        let la = luminance(a), lb = luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    private static func luminance(_ color: PackedColor) -> Float {
+        func linear(_ v: Float) -> Float {
+            v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        let c = color.simd
+        return 0.2126 * linear(c.x) + 0.7152 * linear(c.y) + 0.0722 * linear(c.z)
+    }
+
+    /// Does the run open with a word made only of symbols — the ⧉ of Claude
+    /// Code's artifact pill, the ⏵⏵ of its mode line, ⚠, ✻, ⎿? An icon in
+    /// the label's own colour makes it a control or a status, not a passage.
+    /// ASCII is left out so inline code opening with `<`, `~` or `=` is still
+    /// text, as are the private-use glyphs `eza --icons` puts before a name.
+    private static func opensWithIcon(_ text: String) -> Bool {
+        guard let word = text.split(separator: " ").first else { return false }
+        var sawSymbol = false
+        for scalar in word.unicodeScalars {
+            if (0xFE00...0xFE0F).contains(scalar.value) { continue }   // variation selectors
+            switch scalar.properties.generalCategory {
+            case .otherSymbol, .mathSymbol:
+                guard !scalar.isASCII else { return false }
+                sawSymbol = true
+            default:
+                return false
+            }
+        }
+        return sawSymbol
     }
 
     // MARK: - grid reading
