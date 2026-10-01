@@ -2,6 +2,8 @@
 
 A native macOS terminal emulator. Opinionated, GPU-accelerated, focused.
 
+> **mTerm is now [Kuddo](https://github.com/d0x2a/kuddo).** This repository is archived: it keeps mTerm's history and its releases up to 1.6.0. Kuddo 1.0.0 picked up where mTerm 1.6.0 left off, and new releases, issues and the Homebrew cask (`brew install --cask d0x2a/tap/kuddo`) are there. On Apple silicon, a Homebrew install of mTerm moves to Kuddo on the next `brew upgrade`. Kuddo is built for Apple silicon only, so [mTerm 1.6.0](https://github.com/d0x2a/mTerm/releases/tag/v1.6.0) remains the release for Intel Macs.
+
 ![mTerm running scripts/rendercheck.sh: bold, italic, underlined and inverse text, a truecolor gradient, the 256-colour palette, emoji, and double-width Japanese text](docs/renderer.png)
 
 <sub>`scripts/rendercheck.sh` — bold, italic, underline, faint and inverse, truecolor, the 256-colour palette, emoji, double-width CJK and combining marks, all in one screen.</sub>
